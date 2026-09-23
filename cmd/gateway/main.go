@@ -59,7 +59,11 @@ func main() {
 	limiter := gateway.NewRateLimiter(rps, burst)
 	go limiter.RunEvictor(ctx)
 
-	admin := platform.StartAdmin(platform.Env("ADMIN_ADDR", ":8090"), func(context.Context) error { return nil })
+	admin, err := platform.StartAdmin(platform.Env("ADMIN_ADDR", ":8090"), func(context.Context) error { return nil })
+	if err != nil {
+		log.Error("startup failed", "err", err)
+		os.Exit(1)
+	}
 	defer admin.Shutdown(context.Background())
 
 	// The tracer starts a span for each request, or continues the caller's trace if it sent a traceparent header.

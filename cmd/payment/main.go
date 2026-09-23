@@ -8,7 +8,6 @@ import (
 	"strconv"
 	"time"
 
-
 	"vault/internal/payment"
 	"vault/internal/platform"
 	"vault/kitex_gen/payment/paymentservice"
@@ -31,7 +30,12 @@ func main() {
 		os.Exit(1)
 	}
 	defer pool.Close()
-	admin := platform.StartAdmin(platform.Env("ADMIN_ADDR", ":8082"), pool.Ping)
+	platform.RegisterPoolMetrics(pool)
+	admin, err := platform.StartAdmin(platform.Env("ADMIN_ADDR", ":8082"), pool.Ping)
+	if err != nil {
+		log.Error("startup failed", "err", err)
+		os.Exit(1)
+	}
 	defer admin.Shutdown(ctx)
 
 	// PSP_LATENCY_MS and PSP_FAILURE_RATE let you simulate a slow or flaky provider.

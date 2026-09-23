@@ -60,9 +60,10 @@ func main() {
 		os.Exit(1)
 	}
 	defer pool.Close()
+	platform.RegisterPoolMetrics(pool)
 	store := user.NewStore(pool, keys, index)
 
-	admin := platform.StartAdmin(platform.Env("ADMIN_ADDR", ":8083"), pool.Ping, platform.Route{
+	admin, err := platform.StartAdmin(platform.Env("ADMIN_ADDR", ":8083"), pool.Ping, platform.Route{
 		Pattern: "GET /audit/verify",
 		Handler: func(w http.ResponseWriter, r *http.Request) {
 			res, err := store.Verify(r.Context())
@@ -80,6 +81,10 @@ func main() {
 			})
 		},
 	})
+	if err != nil {
+		log.Error("startup failed", "err", err)
+		os.Exit(1)
+	}
 	defer admin.Shutdown(context.Background())
 
 	// Re-verify the audit chain every minute. audit_chain_valid drops to 0 on tampering, and an alert fires.

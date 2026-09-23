@@ -81,9 +81,15 @@ func (s *Service) Charge(ctx context.Context, orderID uuid.UUID, amount int64, k
 		return Payment{}, false, fmt.Errorf("reserve payment: %w", err)
 	}
 
-	// The key was used before.
-	p, err = scanPayment(s.db.QueryRow(ctx,
-		`SELECT `+paymentColumns+` FROM payments WHERE idempotency_key = $1`, key))
+	// The key was used before. Whether the PENDING reservation is still within its lease is decided
+	// by Postgres, comparing its own now() with the created_at it wrote. Comparing created_at with
+	// this process's clock breaks when the two clocks drift: with the database 24 s behind (seen
+	// after a VM restart), every reservation looked expired and every concurrent retry called the PSP.
+	var inLease bool
+	row := s.db.QueryRow(ctx, `
+		SELECT `+paymentColumns+`, now() - created_at < $2 * interval '1 second'
+		FROM payments WHERE idempotency_key = $1`, key, s.PendingLease.Seconds())
+	err = row.Scan(&p.ID, &p.OrderID, &p.Amount, &p.Status, &p.CreatedAt, &inLease)
 	if err != nil {
 		return Payment{}, false, fmt.Errorf("load payment for replayed key: %w", err)
 	}
@@ -93,7 +99,7 @@ func (s *Service) Charge(ctx context.Context, orderID uuid.UUID, amount int64, k
 	if p.Status != StatusPending {
 		return p, true, nil
 	}
-	if time.Since(p.CreatedAt) < s.PendingLease {
+	if inLease {
 		return Payment{}, false, ErrInProgress
 	}
 	p, _, err = s.callPSP(ctx, p, key)

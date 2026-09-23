@@ -9,6 +9,7 @@ import (
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/route"
+	"github.com/cloudwego/kitex/pkg/kerrors"
 
 	orderapi "vault/kitex_gen/order"
 	"vault/kitex_gen/order/orderservice"
@@ -170,7 +171,15 @@ func (g *Gateway) writeUpstreamError(ctx context.Context, c *app.RequestContext,
 		}
 		abort(c, int(pe.Code), pe.Message)
 	default:
-		slog.ErrorContext(ctx, "upstream call failed", "op", op, "request_id", c.GetString(ctxRequestID), "err", err)
+		reason := "other"
+		switch {
+		case errors.Is(err, kerrors.ErrCircuitBreak):
+			reason = "circuit_open"
+		case kerrors.IsTimeoutError(err):
+			reason = "timeout"
+		}
+		upstreamFailures.WithLabelValues(op, reason).Inc()
+		slog.ErrorContext(ctx, "upstream call failed", "op", op, "reason", reason, "request_id", c.GetString(ctxRequestID), "err", err)
 		c.Header("Retry-After", "1")
 		abort(c, 503, "temporarily unavailable, retry with the same Idempotency-Key")
 	}

@@ -317,6 +317,9 @@ func TestProfileLifecycle(t *testing.T) {
 	if r := h.do("GET", "/v1/me/profile", tok, ""); r.Code != 404 {
 		t.Fatalf("get after delete: %d, want 404", r.Code)
 	}
+	if r := h.do("DELETE", "/v1/me", tok, ""); r.Code != 204 {
+		t.Fatalf("second delete: %d, want 204 (DELETE is idempotent)", r.Code)
+	}
 }
 
 func TestSupportAccessNeedsRoleAndReason(t *testing.T) {

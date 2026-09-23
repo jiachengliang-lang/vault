@@ -30,17 +30,15 @@ CREATE TABLE orders (
 );
 
 -- Transactional outbox: written in the SAME transaction as the order row,
--- then a relay publishes it to Kafka. Solves the dual-write problem.
+-- then a relay publishes it to Kafka and deletes it. Solves the dual-write problem.
 CREATE TABLE outbox (
     id           BIGSERIAL PRIMARY KEY,
     topic        TEXT NOT NULL,
     key          TEXT NOT NULL,          -- partition key (user_id) -> per-user ordering
     payload      JSONB NOT NULL,
     headers      JSONB NOT NULL DEFAULT '{}', -- trace context of the request that wrote the event
-    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-    published_at TIMESTAMPTZ
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-CREATE INDEX outbox_unpublished ON outbox (id) WHERE published_at IS NULL;
 
 -- ---------- payment service ----------
 CREATE TABLE payments (

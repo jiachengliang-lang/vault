@@ -3,6 +3,7 @@ package platform
 import (
 	"context"
 	"log/slog"
+	"strconv"
 	"time"
 
 	"github.com/cloudwego/kitex/pkg/endpoint"
@@ -41,13 +42,23 @@ func InitTracing(ctx context.Context, service string) (shutdown func(context.Con
 		// Spans are sent in batches in the background, so tracing adds almost no request latency.
 		sdktrace.WithBatcher(exporter),
 		sdktrace.WithResource(resource.NewSchemaless(semconv.ServiceName(service))),
-		// Every request is traced here. At production volume you'd sample (say 1%), and keep
-		// every trace that has an error.
-		sdktrace.WithSampler(sdktrace.ParentBased(sdktrace.AlwaysSample())),
+		// TRACE_SAMPLE_RATIO is the fraction of requests traced: 1 (all) for development, so any
+		// request you send can be found; a small fraction in production, where tracing everything
+		// costs CPU in every service and overwhelms the trace store. ParentBased means only the
+		// first service decides; everyone downstream follows, so a trace is never half-recorded.
+		sdktrace.WithSampler(sdktrace.ParentBased(sdktrace.TraceIDRatioBased(sampleRatio()))),
 	)
 	otel.SetTracerProvider(tp)
 	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{}))
 	return tp.Shutdown, nil
+}
+
+func sampleRatio() float64 {
+	r, err := strconv.ParseFloat(Env("TRACE_SAMPLE_RATIO", "1"), 64)
+	if err != nil || r < 0 || r > 1 {
+		return 1
+	}
+	return r
 }
 
 // traceHandler adds trace_id and span_id to every log line written with a context,

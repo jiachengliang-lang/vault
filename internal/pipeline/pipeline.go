@@ -41,7 +41,7 @@ var (
 	endToEnd = promauto.NewHistogram(prometheus.HistogramOpts{
 		Name:    "pipeline_event_end_to_end_seconds",
 		Help:    "Time from the event occurring to it landing in analytics.",
-		Buckets: []float64{.05, .1, .25, .5, 1, 2.5, 5, 10, 30, 60, 300},
+		Buckets: []float64{.05, .1, .25, .5, 1, 2.5, 5, 10, 30, 60, 120, 300, 600, 1800},
 	})
 )
 
@@ -121,14 +121,16 @@ func Transform(value []byte, tok Tokenizer) (Row, error) {
 }
 
 type Sink interface {
-	Insert(ctx context.Context, r Row) error
+	// InsertBatch stores rows in one statement and one commit. It must be idempotent:
+	// a redelivered batch (or a duplicate within one) stores each event once.
+	InsertBatch(ctx context.Context, rows []Row) error
 }
 
 type DLQ interface {
 	Send(ctx context.Context, rec *kgo.Record, reason error) error
 }
 
-// Processor handles one record at a time. The two failure kinds are treated differently:
+// Processor handles a batch of records per poll. The two failure kinds are treated differently:
 //   - permanent (ErrPoison): send to the DLQ and move on, so one bad message can't block the partition.
 //   - transient (DB down): retry with backoff until it works. Sending these to the DLQ would
 //     dump every message during an outage; blocking instead applies backpressure, and Kafka
@@ -145,10 +147,56 @@ func NewProcessor(tok Tokenizer, sink Sink, dlq DLQ) *Processor {
 	return &Processor{tok: tok, sink: sink, dlq: dlq, MinBackoff: 100 * time.Millisecond, MaxBackoff: 5 * time.Second}
 }
 
-// Handle returns an error only if ctx is cancelled before the record is fully handled.
-// The caller must then not commit the offset, so the record is redelivered.
+// Handle processes a single record. See HandleBatch.
 func (p *Processor) Handle(ctx context.Context, rec *kgo.Record) error {
-	// Continue the trace of the request that produced this event (see outbox.Write).
+	return p.HandleBatch(ctx, []*kgo.Record{rec})
+}
+
+// HandleBatch processes one poll's worth of records. It returns an error only if ctx is cancelled
+// before every record is handled; the caller must then not commit offsets, so the batch is redelivered.
+//
+// Valid records are written in ONE insert and ONE commit. Postgres makes every commit wait for its
+// write-ahead log to reach disk, so under load the commit rate, not query speed, is the limit;
+// one commit per event made the pipeline a third of all commits and it fell minutes behind.
+func (p *Processor) HandleBatch(ctx context.Context, recs []*kgo.Record) error {
+	rows := make([]Row, 0, len(recs))
+	links := make([]trace.Link, 0, len(recs))
+	for _, rec := range recs {
+		row, ok, err := p.prepare(ctx, rec)
+		if err != nil {
+			return err
+		}
+		if ok {
+			rows = append(rows, row.Row)
+			links = append(links, trace.Link{SpanContext: row.span})
+		}
+	}
+	if len(rows) == 0 {
+		return nil
+	}
+
+	// One span for the batch write, linked to every event's own span: many traces fan in here.
+	ctx, span := otel.Tracer("pipeline").Start(ctx, "analytics batch insert",
+		trace.WithLinks(links...), trace.WithAttributes(attribute.Int("batch.size", len(rows))))
+	defer span.End()
+	if err := p.retry(ctx, "analytics insert", func() error { return p.sink.InsertBatch(ctx, rows) }); err != nil {
+		return err
+	}
+	recordsTotal.WithLabelValues("stored").Add(float64(len(rows)))
+	for _, r := range rows {
+		endToEnd.Observe(time.Since(r.TS).Seconds())
+	}
+	return nil
+}
+
+type preparedRow struct {
+	Row
+	span trace.SpanContext
+}
+
+// prepare validates one record inside a span that continues the trace of the request that produced
+// it (see outbox.Write). Poison records go to the DLQ here; ok reports whether there's a row to store.
+func (p *Processor) prepare(ctx context.Context, rec *kgo.Record) (preparedRow, bool, error) {
 	ctx = otel.GetTextMapPropagator().Extract(ctx, headerCarrier(rec.Headers))
 	ctx, span := otel.Tracer("pipeline").Start(ctx, "process "+rec.Topic,
 		trace.WithSpanKind(trace.SpanKindConsumer),
@@ -164,18 +212,13 @@ func (p *Processor) Handle(ctx context.Context, rec *kgo.Record) error {
 		slog.WarnContext(ctx, "sending to DLQ", "topic", rec.Topic, "partition", rec.Partition, "offset", rec.Offset, "err", reason)
 		span.SetStatus(codes.Error, reason.Error())
 		if err := p.retry(ctx, "dlq send", func() error { return p.dlq.Send(ctx, rec, reason) }); err != nil {
-			return err
+			return preparedRow{}, false, err
 		}
 		recordsTotal.WithLabelValues("dead_lettered").Inc()
-		return nil
+		return preparedRow{}, false, nil
 	}
 	span.SetAttributes(attribute.String("event.type", row.EventType))
-	if err := p.retry(ctx, "analytics insert", func() error { return p.sink.Insert(ctx, row) }); err != nil {
-		return err
-	}
-	recordsTotal.WithLabelValues("stored").Inc()
-	endToEnd.Observe(time.Since(row.TS).Seconds())
-	return nil
+	return preparedRow{Row: row, span: span.SpanContext()}, true, nil
 }
 
 // headerCarrier lets OpenTelemetry read trace context from Kafka record headers.
@@ -230,12 +273,22 @@ func NewPostgresSink(db *pgxpool.Pool) *PostgresSink {
 	return &PostgresSink{db: db}
 }
 
-func (s *PostgresSink) Insert(ctx context.Context, r Row) error {
+// InsertBatch sends the rows as five arrays and lets Postgres unnest them into rows: one statement,
+// one round trip and one commit however many rows there are.
+func (s *PostgresSink) InsertBatch(ctx context.Context, rows []Row) error {
+	ids := make([]uuid.UUID, len(rows))
+	tokens := make([]string, len(rows))
+	types := make([]string, len(rows))
+	amounts := make([]int64, len(rows))
+	times := make([]time.Time, len(rows))
+	for i, r := range rows {
+		ids[i], tokens[i], types[i], amounts[i], times[i] = r.EventID, r.UserToken, r.EventType, r.Amount, r.TS
+	}
 	_, err := s.db.Exec(ctx, `
 		INSERT INTO analytics_events (event_id, user_token, event_type, amount_cents, ts)
-		VALUES ($1, $2, $3, $4, $5)
+		SELECT * FROM unnest($1::uuid[], $2::text[], $3::text[], $4::bigint[], $5::timestamptz[])
 		ON CONFLICT (event_id) DO NOTHING`,
-		r.EventID, r.UserToken, r.EventType, r.Amount, r.TS)
+		ids, tokens, types, amounts, times)
 	return err
 }
 
@@ -269,6 +322,10 @@ func (d *KafkaDLQ) Send(ctx context.Context, rec *kgo.Record, reason error) erro
 // The client must be created with DisableAutoCommit and BlockRebalanceOnPoll, so partitions
 // can't be reassigned between processing a batch and committing it.
 func Consume(ctx context.Context, cl *kgo.Client, p *Processor) {
+	// With BlockRebalanceOnPoll, every poll must be followed by AllowRebalance, including the one
+	// interrupted by shutdown. Without this, cl.Close() waits for it forever and the process
+	// never exits (found when stopped pipelines kept piling up).
+	defer cl.AllowRebalance()
 	for {
 		fetches := cl.PollRecords(ctx, 500)
 		if fetches.IsClientClosed() || ctx.Err() != nil {
@@ -278,13 +335,9 @@ func Consume(ctx context.Context, cl *kgo.Client, p *Processor) {
 			slog.Error("fetch error", "topic", topic, "partition", partition, "err", err)
 		})
 
-		var stopped bool
-		fetches.EachRecord(func(rec *kgo.Record) {
-			if !stopped && p.Handle(ctx, rec) != nil {
-				stopped = true
-			}
-		})
-		if stopped {
+		var recs []*kgo.Record
+		fetches.EachRecord(func(rec *kgo.Record) { recs = append(recs, rec) })
+		if err := p.HandleBatch(ctx, recs); err != nil {
 			return // shutting down mid-batch: don't commit
 		}
 		if err := cl.CommitUncommittedOffsets(ctx); err != nil {

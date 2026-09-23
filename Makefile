@@ -1,4 +1,4 @@
-.PHONY: up down logs psql topics build run test lint load chaos
+.PHONY: up down logs psql topics build run test lint load bench chaos
 
 up:        ## start infra (postgres, redpanda, jaeger, prometheus, grafana)
 	docker compose up -d
@@ -31,5 +31,9 @@ load: build ## k6 load test against the gateway (run `make run` in another termi
 	bin/tokengen -n 500 > loadtest/tokens.json
 	k6 run loadtest/checkout.js
 
-chaos:     ## kill a service mid-load and watch recovery in Grafana/Jaeger
+bench: build ## latency at increasing fixed rates (run `make run` in another terminal first)
+	bin/tokengen -n 500 > loadtest/tokens.json
+	loadtest/bench.sh 100 200 400 600 800
+
+chaos: build ## break Postgres, Kafka and payment under load, then check consistency (needs `make run`)
 	./scripts/chaos.sh

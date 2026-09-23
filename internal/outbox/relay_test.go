@@ -35,13 +35,14 @@ type testEvent struct {
 	UserID  uuid.UUID `json:"user_id"`
 }
 
-// An outbox event must reach Kafka, keyed as written, and be marked published.
+// An outbox event must reach Kafka, keyed as written, and leave the outbox.
 func TestRelayPublishesOutboxEvents(t *testing.T) {
 	pool := platform.TestPool(t)
 	producer := testKafka(t)
 	relay := NewRelay(pool, producer)
 	ctx := context.Background()
 
+	start := time.Now().Add(-time.Second)
 	ev := testEvent{EventID: uuid.New(), UserID: uuid.New()}
 	tx, err := pool.Begin(ctx)
 	if err != nil {
@@ -55,19 +56,19 @@ func TestRelayPublishesOutboxEvents(t *testing.T) {
 	}
 
 	// Another relay (e.g. a running order service) may hold the lock and publish it
-	// instead, so keep going until the row is marked published by someone.
+	// instead, so keep going until the row has been published by someone.
 	deadline := time.Now().Add(10 * time.Second)
 	for {
 		if _, err := relay.PublishBatch(ctx); err != nil {
 			t.Fatal(err)
 		}
-		var published bool
-		err := pool.QueryRow(ctx, `SELECT published_at IS NOT NULL FROM outbox WHERE payload->>'event_id' = $1`,
-			ev.EventID.String()).Scan(&published)
+		var remaining int
+		err := pool.QueryRow(ctx, `SELECT count(*) FROM outbox WHERE payload->>'event_id' = $1`,
+			ev.EventID.String()).Scan(&remaining)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if published {
+		if remaining == 0 {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -75,7 +76,8 @@ func TestRelayPublishesOutboxEvents(t *testing.T) {
 		}
 	}
 
-	consumer := testKafka(t, kgo.ConsumeTopics(testTopic), kgo.ConsumeResetOffset(kgo.NewOffset().AtStart()))
+	// Start from records produced after this test began: the topic may hold millions of older ones.
+	consumer := testKafka(t, kgo.ConsumeTopics(testTopic), kgo.ConsumeResetOffset(kgo.NewOffset().AfterMilli(start.UnixMilli())))
 	pollCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	for {

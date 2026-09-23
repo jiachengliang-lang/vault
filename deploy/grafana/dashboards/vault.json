@@ -1418,13 +1418,251 @@
       }
     },
     {
+      "type": "timeseries",
+      "title": "Gateway upstream failures / sec",
+      "description": "Calls from the gateway that failed. circuit_open = failed immediately because the breaker is open (instead of waiting out a timeout).",
+      "id": 32,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 38,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (reason) (rate(gateway_upstream_failures_total[1m])) or label_replace(vector(0), \"reason\", \"none\", \"\", \"\")",
+          "legendFormat": "{{reason}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "min": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "spanNulls": true,
+            "axisSoftMin": 0,
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "timeout"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#3987e5"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "circuit_open"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#d95926"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "other"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#199e70"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "none"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#c98500"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "DB connection wait per request",
+      "description": "Average time a query waited for a free database connection. Rising under load means the pool or the database is the bottleneck.",
+      "id": 33,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 46,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (service) (rate(db_pool_empty_acquire_wait_seconds_total[1m])) / clamp_min(sum by (service) (rate(db_pool_acquires_total[1m])), 1)",
+          "legendFormat": "{{service}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "spanNulls": true,
+            "axisSoftMin": 0,
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "order"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#3987e5"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "payment"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#d95926"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "user"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#199e70"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "pipeline"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#c98500"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
       "type": "row",
       "title": "Events (outbox \u2192 Kafka \u2192 pipeline)",
       "id": 16,
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 46,
+        "y": 54,
         "w": 24,
         "h": 1
       }
@@ -1440,7 +1678,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 47,
+        "y": 55,
         "w": 6,
         "h": 4
       },
@@ -1503,7 +1741,7 @@
       },
       "gridPos": {
         "x": 6,
-        "y": 47,
+        "y": 55,
         "w": 6,
         "h": 4
       },
@@ -1567,7 +1805,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 47,
+        "y": 55,
         "w": 6,
         "h": 4
       },
@@ -1627,7 +1865,7 @@
       },
       "gridPos": {
         "x": 18,
-        "y": 47,
+        "y": 55,
         "w": 6,
         "h": 4
       },
@@ -1691,7 +1929,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 51,
+        "y": 59,
         "w": 8,
         "h": 8
       },
@@ -1765,7 +2003,7 @@
       },
       "gridPos": {
         "x": 8,
-        "y": 51,
+        "y": 59,
         "w": 8,
         "h": 8
       },
@@ -1854,7 +2092,7 @@
       },
       "gridPos": {
         "x": 16,
-        "y": 51,
+        "y": 59,
         "w": 8,
         "h": 8
       },
@@ -1939,7 +2177,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 59,
+        "y": 67,
         "w": 24,
         "h": 1
       }
@@ -1955,7 +2193,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 60,
+        "y": 68,
         "w": 12,
         "h": 8
       },
@@ -2074,7 +2312,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 60,
+        "y": 68,
         "w": 6,
         "h": 8
       },
@@ -2130,7 +2368,7 @@
       },
       "gridPos": {
         "x": 18,
-        "y": 60,
+        "y": 68,
         "w": 6,
         "h": 8
       },
@@ -2182,7 +2420,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 68,
+        "y": 76,
         "w": 24,
         "h": 1
       }
@@ -2198,7 +2436,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 69,
+        "y": 77,
         "w": 8,
         "h": 8
       },
@@ -2332,7 +2570,7 @@
       },
       "gridPos": {
         "x": 8,
-        "y": 69,
+        "y": 77,
         "w": 8,
         "h": 8
       },
@@ -2466,7 +2704,7 @@
       },
       "gridPos": {
         "x": 16,
-        "y": 69,
+        "y": 77,
         "w": 8,
         "h": 8
       },

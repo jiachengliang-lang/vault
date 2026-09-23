@@ -3,13 +3,16 @@ module vault
 go 1.26.0
 
 require (
+	github.com/bytedance/gopkg v0.1.4
 	github.com/cloudwego/gopkg v0.2.1
 	github.com/cloudwego/hertz v0.10.6
 	github.com/cloudwego/kitex v0.16.3
 	github.com/exaring/otelpgx v0.12.0
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/google/uuid v1.6.0
+	github.com/hertz-contrib/obs-opentelemetry/tracing v0.4.1
 	github.com/jackc/pgx/v5 v5.11.0
+	github.com/kitex-contrib/obs-opentelemetry v0.3.0
 	github.com/prometheus/client_golang v1.24.1
 	github.com/twmb/franz-go v1.22.0
 	go.opentelemetry.io/otel v1.46.0
@@ -21,7 +24,6 @@ require (
 
 require (
 	github.com/beorn7/perks v1.0.1 // indirect
-	github.com/bytedance/gopkg v0.1.4 // indirect
 	github.com/bytedance/sonic v1.15.0 // indirect
 	github.com/bytedance/sonic/loader v0.5.0 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
@@ -42,14 +44,12 @@ require (
 	github.com/golang/protobuf v1.5.4 // indirect
 	github.com/google/pprof v0.0.0-20240727154555-813a5fbdbec8 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.30.0 // indirect
-	github.com/hertz-contrib/obs-opentelemetry/tracing v0.4.1 // indirect
 	github.com/iancoleman/strcase v0.2.0 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
 	github.com/jackc/puddle/v2 v2.2.2 // indirect
 	github.com/jhump/protoreflect v1.8.2 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
-	github.com/kitex-contrib/obs-opentelemetry v0.3.0 // indirect
 	github.com/klauspost/compress v1.20.0 // indirect
 	github.com/klauspost/cpuid/v2 v2.2.9 // indirect
 	github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd // indirect

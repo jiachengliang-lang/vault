@@ -58,13 +58,26 @@ func TestDeleteCryptoShredsEveryCopy(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 	p := Profile{UserID: uuid.New(), Email: uniqueEmail(), Address: "somewhere"}
+
+	// Hold the relay lock so a running service's relay can't publish (and delete) the outbox row
+	// before we read it. Released when this connection goes back to the pool.
+	conn, err := s.db.Acquire(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Release()
+	if _, err := conn.Exec(ctx, `SELECT pg_advisory_lock(7700001)`); err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Exec(ctx, `SELECT pg_advisory_unlock(7700001)`)
+
 	if err := s.Upsert(ctx, p, self); err != nil {
 		t.Fatal(err)
 	}
 
-	// Grab the copy that went to Kafka, as a downstream consumer or a backup would hold it.
+	// Grab the copy that goes to Kafka, as a downstream consumer or a backup would hold it.
 	var payload []byte
-	err := s.db.QueryRow(ctx, `
+	err = s.db.QueryRow(ctx, `
 		SELECT payload FROM outbox
 		WHERE topic = $1 AND payload->>'user_id' = $2 AND payload->>'type' = 'user.profile_updated'`,
 		TopicUserEvents, p.UserID.String()).Scan(&payload)

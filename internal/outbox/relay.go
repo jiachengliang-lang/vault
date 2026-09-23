@@ -59,8 +59,13 @@ func Write(ctx context.Context, tx pgx.Tx, topic, key string, event any) error {
 
 // Relay publishes outbox rows to Kafka, oldest first, and marks them published.
 //
-// Delivery is at-least-once: if we crash after Kafka acks but before the UPDATE commits,
-// the same rows are published again on restart. Consumers dedupe on event_id.
+// Published rows are deleted in the same transaction that claimed them. Delivery is at-least-once:
+// if we crash after Kafka acks but before the DELETE commits, the same rows are published again on
+// restart, and consumers dedupe on event_id.
+//
+// Deleting instead of marking rows published (UPDATE ... SET published_at) matters under load:
+// Postgres writes a whole new copy of a row on UPDATE, payload included, and commits are limited by
+// how fast that write-ahead log reaches disk. The table also stays small, with no cleanup job.
 //
 // Only one relay publishes at a time, across all instances and services (a Postgres advisory lock).
 // Two relays working in parallel could publish a user's order.paid before their
@@ -70,17 +75,16 @@ type Relay struct {
 	kafka     *kgo.Client
 	BatchSize int
 	Interval  time.Duration
-	Retention time.Duration // published rows are deleted after this long
 }
 
 func NewRelay(db *pgxpool.Pool, kafka *kgo.Client) *Relay {
-	return &Relay{db: db, kafka: kafka, BatchSize: 500, Interval: 200 * time.Millisecond, Retention: time.Hour}
+	return &Relay{db: db, kafka: kafka, BatchSize: 500, Interval: 200 * time.Millisecond}
 }
 
 // Run publishes until ctx is cancelled. A full batch means there's a backlog, so it
 // loops immediately; otherwise it sleeps for Interval.
 func (r *Relay) Run(ctx context.Context) {
-	lastCleanup, lastStats := time.Now(), time.Time{}
+	var lastStats time.Time
 	for {
 		n, err := r.PublishBatch(ctx)
 		if err != nil && ctx.Err() == nil {
@@ -89,10 +93,6 @@ func (r *Relay) Run(ctx context.Context) {
 		if time.Since(lastStats) > 5*time.Second {
 			r.recordStats(ctx)
 			lastStats = time.Now()
-		}
-		if time.Since(lastCleanup) > time.Minute {
-			r.cleanup(ctx)
-			lastCleanup = time.Now()
 		}
 		if err == nil && n == r.BatchSize {
 			continue
@@ -124,8 +124,7 @@ func (r *Relay) PublishBatch(ctx context.Context) (int, error) {
 	}
 
 	rows, err := tx.Query(ctx, `
-		SELECT id, topic, key, payload, headers FROM outbox
-		WHERE published_at IS NULL ORDER BY id LIMIT $1`, r.BatchSize)
+		SELECT id, topic, key, payload, headers FROM outbox ORDER BY id LIMIT $1`, r.BatchSize)
 	if err != nil {
 		return 0, err
 	}
@@ -158,8 +157,8 @@ func (r *Relay) PublishBatch(ctx context.Context) (int, error) {
 	if err := r.kafka.ProduceSync(ctx, records...).FirstErr(); err != nil {
 		return 0, fmt.Errorf("produce: %w", err)
 	}
-	if _, err := tx.Exec(ctx, `UPDATE outbox SET published_at = now() WHERE id = ANY($1)`, ids); err != nil {
-		return 0, fmt.Errorf("mark published: %w", err)
+	if _, err := tx.Exec(ctx, `DELETE FROM outbox WHERE id = ANY($1)`, ids); err != nil {
+		return 0, fmt.Errorf("delete published: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return 0, err
@@ -172,19 +171,10 @@ func (r *Relay) recordStats(ctx context.Context) {
 	var n int64
 	var age float64
 	err := r.db.QueryRow(ctx, `
-		SELECT count(*), COALESCE(EXTRACT(EPOCH FROM now() - min(created_at)), 0)
-		FROM outbox WHERE published_at IS NULL`).Scan(&n, &age)
+		SELECT count(*), COALESCE(EXTRACT(EPOCH FROM now() - min(created_at)), 0) FROM outbox`).Scan(&n, &age)
 	if err != nil {
 		return
 	}
 	backlog.Set(float64(n))
 	oldestAge.Set(age)
-}
-
-func (r *Relay) cleanup(ctx context.Context) {
-	_, err := r.db.Exec(ctx, `DELETE FROM outbox WHERE published_at < now() - $1::interval`,
-		fmt.Sprintf("%d seconds", int(r.Retention.Seconds())))
-	if err != nil && ctx.Err() == nil {
-		slog.Warn("outbox relay: cleanup failed", "err", err)
-	}
 }

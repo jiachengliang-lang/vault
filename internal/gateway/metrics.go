@@ -21,6 +21,10 @@ var (
 	}, []string{"route", "method", "code"})
 	httpDuration = platform.NewHistogram("http_request_duration_seconds",
 		"HTTP request latency, as the client sees it (includes downstream RPCs).", "route", "method")
+	upstreamFailures = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "gateway_upstream_failures_total",
+		Help: "Failed calls to downstream services, by operation and reason: circuit_open (failed fast), timeout, other.",
+	}, []string{"op", "reason"})
 	checkoutOutcomes = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "checkout_outcomes_total",
 		Help: "Checkouts by outcome: paid, declined, replayed, unavailable.",

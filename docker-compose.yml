@@ -29,6 +29,9 @@ services:
     image: jaegertracing/all-in-one:1.60
     environment:
       COLLECTOR_OTLP_ENABLED: "true"
+      # In-memory storage keeps every trace until it runs out of memory; at ~1,000 req/s with 100%
+      # sampling that took a few minutes. Keep only the newest 20k traces instead.
+      MEMORY_MAX_TRACES: "20000"
     ports: ["16686:16686", "4317:4317", "4318:4318"]
 
   # Metrics at http://localhost:9090, scrapes each service's /metrics

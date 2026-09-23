@@ -7,7 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/http/pprof"
 	"os"
 	"time"
 
@@ -67,11 +69,21 @@ type Route struct {
 }
 
 // StartAdmin serves /healthz (liveness), /readyz (can we reach our dependencies?), /metrics
-// (for Prometheus) and any extra internal routes on a separate port from business traffic,
+// (for Prometheus), /debug/pprof (profiling) and any extra internal routes on a separate port from business traffic,
 // one that's never exposed publicly.
-func StartAdmin(addr string, ready func(context.Context) error, routes ...Route) *http.Server {
+//
+// It binds the port before returning and fails if it can't: a service without health checks and
+// metrics is invisible to whatever runs it, so it's better not to start at all.
+func StartAdmin(addr string, ready func(context.Context) error, routes ...Route) (*http.Server, error) {
 	mux := http.NewServeMux()
 	mux.Handle("GET /metrics", promhttp.Handler())
+	// pprof: CPU, heap, goroutine and lock profiles, e.g.
+	//   go tool pprof -top 'http://localhost:8081/debug/pprof/profile?seconds=15'
+	// Only on the admin port: profiles expose internals and cost CPU while running.
+	mux.HandleFunc("GET /debug/pprof/", pprof.Index)
+	mux.HandleFunc("GET /debug/pprof/profile", pprof.Profile)
+	mux.HandleFunc("GET /debug/pprof/symbol", pprof.Symbol)
+	mux.HandleFunc("GET /debug/pprof/trace", pprof.Trace)
 	for _, r := range routes {
 		mux.HandleFunc(r.Pattern, r.Handler)
 	}
@@ -87,11 +99,15 @@ func StartAdmin(addr string, ready func(context.Context) error, routes ...Route)
 		}
 		w.Write([]byte("ok"))
 	})
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, fmt.Errorf("admin server: %w", err)
+	}
 	srv := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	go func() {
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			slog.Error("admin server stopped", "err", err)
 		}
 	}()
-	return srv
+	return srv, nil
 }

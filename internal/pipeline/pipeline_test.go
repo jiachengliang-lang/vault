@@ -79,16 +79,18 @@ type fakeSink struct {
 	mu       sync.Mutex
 	failNext int
 	rows     []Row
+	batches  int
 }
 
-func (s *fakeSink) Insert(_ context.Context, r Row) error {
+func (s *fakeSink) InsertBatch(_ context.Context, rows []Row) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.failNext > 0 {
 		s.failNext--
 		return errors.New("connection refused")
 	}
-	s.rows = append(s.rows, r)
+	s.rows = append(s.rows, rows...)
+	s.batches++
 	return nil
 }
 
@@ -126,6 +128,27 @@ func TestPoisonGoesToDLQ(t *testing.T) {
 	}
 }
 
+// A batch with poison mixed in: poison goes to the DLQ, the rest is stored in a single insert.
+func TestBatchStoresValidRecordsInOneInsert(t *testing.T) {
+	sink, dlq := &fakeSink{}, &fakeDLQ{}
+	var recs []*kgo.Record
+	for i := range 10 {
+		if i == 3 || i == 7 {
+			recs = append(recs, &kgo.Record{Value: []byte("garbage")})
+			continue
+		}
+		_, b := validEvent(t)
+		recs = append(recs, &kgo.Record{Value: b})
+	}
+	if err := newTestProcessor(sink, dlq).HandleBatch(context.Background(), recs); err != nil {
+		t.Fatal(err)
+	}
+	if len(sink.rows) != 8 || sink.batches != 1 || len(dlq.sent) != 2 {
+		t.Fatalf("stored %d rows in %d inserts, dead-lettered %d; want 8 rows in 1 insert, 2 dead-lettered",
+			len(sink.rows), sink.batches, len(dlq.sent))
+	}
+}
+
 // On shutdown during an outage, Handle gives up so the offset isn't committed.
 func TestHandleStopsOnShutdown(t *testing.T) {
 	sink := &fakeSink{failNext: 1 << 30}
@@ -137,26 +160,34 @@ func TestHandleStopsOnShutdown(t *testing.T) {
 	}
 }
 
-// Redelivered events (at-least-once) must not create duplicate analytics rows.
+// Redelivered events (at-least-once) must not create duplicate analytics rows,
+// whether the duplicate arrives in a later batch or in the same one.
 func TestPostgresSinkIsIdempotent(t *testing.T) {
 	pool := platform.TestPool(t)
 	sink := NewPostgresSink(pool)
 	ctx := context.Background()
-	_, b := validEvent(t)
-	row, err := Transform(b, tok)
-	if err != nil {
-		t.Fatal(err)
-	}
+	var rows []Row
 	for range 3 {
-		if err := sink.Insert(ctx, row); err != nil {
+		_, b := validEvent(t)
+		row, err := Transform(b, tok)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rows = append(rows, row)
+	}
+	batch := append(rows, rows[0]) // duplicate inside one batch
+	for range 2 {                  // and the whole batch redelivered
+		if err := sink.InsertBatch(ctx, batch); err != nil {
 			t.Fatal(err)
 		}
 	}
-	var n int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM analytics_events WHERE event_id = $1`, row.EventID).Scan(&n); err != nil {
-		t.Fatal(err)
-	}
-	if n != 1 {
-		t.Fatalf("got %d rows, want 1", n)
+	for _, r := range rows {
+		var n int
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM analytics_events WHERE event_id = $1`, r.EventID).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if n != 1 {
+			t.Fatalf("event %s stored %d times, want 1", r.EventID, n)
+		}
 	}
 }

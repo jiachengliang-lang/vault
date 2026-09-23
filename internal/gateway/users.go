@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"errors"
 
 	"github.com/cloudwego/hertz/pkg/app"
 
@@ -55,12 +56,19 @@ func (g *Gateway) GetProfile(ctx context.Context, c *app.RequestContext) {
 }
 
 // DeleteMe crypto-shreds the caller's account ("right to be forgotten").
+//
+// It's idempotent, as HTTP DELETE should be: "already gone" is success. That matters because the RPC
+// is retried on timeout, and a retry after a delete that did commit would otherwise report 404.
 func (g *Gateway) DeleteMe(ctx context.Context, c *app.RequestContext) {
 	userID := c.GetString(ctxUserID)
 	_, err := g.users.DeleteUser(ctx, &userapi.DeleteUserRequest{
 		UserId:   userID,
 		Accessor: &userapi.Accessor{Actor: "user:" + userID, Reason: "user-requested deletion"},
 	})
+	var ue *userapi.UserError
+	if errors.As(err, &ue) && ue.Code == 404 {
+		err = nil
+	}
 	if err != nil {
 		g.writeUpstreamError(ctx, c, "delete user", err)
 		return

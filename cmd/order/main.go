@@ -35,7 +35,12 @@ func main() {
 		os.Exit(1)
 	}
 	defer pool.Close()
-	admin := platform.StartAdmin(platform.Env("ADMIN_ADDR", ":8081"), pool.Ping)
+	platform.RegisterPoolMetrics(pool)
+	admin, err := platform.StartAdmin(platform.Env("ADMIN_ADDR", ":8081"), pool.Ping)
+	if err != nil {
+		log.Error("startup failed", "err", err)
+		os.Exit(1)
+	}
 	defer admin.Shutdown(context.Background())
 
 	// Kafka being down must not stop orders from being taken: the relay just falls behind

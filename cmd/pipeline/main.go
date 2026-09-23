@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/twmb/franz-go/pkg/kgo"
 
@@ -40,6 +41,7 @@ func main() {
 		os.Exit(1)
 	}
 	defer pool.Close()
+	platform.RegisterPoolMetrics(pool)
 
 	cl, err := kgo.NewClient(
 		kgo.SeedBrokers(strings.Split(platform.Env("KAFKA_BROKERS", platform.DefaultKafkaBrokers), ",")...),
@@ -53,11 +55,14 @@ func main() {
 		log.Error("kafka client", "err", err)
 		os.Exit(1)
 	}
-	defer cl.Close()
 
-	admin := platform.StartAdmin(platform.Env("ADMIN_ADDR", ":8084"), func(ctx context.Context) error {
+	admin, err := platform.StartAdmin(platform.Env("ADMIN_ADDR", ":8084"), func(ctx context.Context) error {
 		return errors.Join(pool.Ping(ctx), cl.Ping(ctx))
 	})
+	if err != nil {
+		log.Error("startup failed", "err", err)
+		os.Exit(1)
+	}
 	defer admin.Shutdown(context.Background())
 
 	key := platform.Env("TOKEN_KEY", "dev-token-key-change-me")
@@ -71,5 +76,19 @@ func main() {
 	)
 	log.Info("pipeline starting", "group", consumerGroup, "topic", order.TopicOrderEvents)
 	pipeline.Consume(ctx, cl, p)
-	log.Info("pipeline stopped")
+
+	// Leaving the consumer group can wait on a rebalance (for example one waiting out a crashed
+	// member's session). Graceful shutdown still needs a deadline: past it, exit anyway. That's
+	// safe because uncommitted records are redelivered and the analytics insert is idempotent.
+	closed := make(chan struct{})
+	go func() {
+		cl.Close()
+		close(closed)
+	}()
+	select {
+	case <-closed:
+		log.Info("pipeline stopped")
+	case <-time.After(10 * time.Second):
+		log.Warn("kafka client close timed out, exiting anyway; uncommitted records will be redelivered")
+	}
 }
