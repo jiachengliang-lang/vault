@@ -22,7 +22,7 @@ func testKafka(t *testing.T, opts ...kgo.Opt) *kgo.Client {
 	defer cancel()
 	if err := cl.Ping(ctx); err != nil {
 		cl.Close()
-		t.Skipf("kafka unavailable, run `make up` first: %v", err)
+		platform.SkipUnlessRequired(t, "kafka unavailable, run `make up` first: %v", err)
 	}
 	t.Cleanup(cl.Close)
 	return cl

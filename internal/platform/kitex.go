@@ -10,7 +10,6 @@ import (
 	"github.com/cloudwego/kitex/client"
 	"github.com/cloudwego/kitex/pkg/circuitbreak"
 	"github.com/cloudwego/kitex/pkg/kerrors"
-	"github.com/cloudwego/kitex/pkg/retry"
 	"github.com/cloudwego/kitex/pkg/rpcinfo"
 	"github.com/cloudwego/kitex/server"
 	"github.com/kitex-contrib/obs-opentelemetry/tracing"
@@ -31,27 +30,20 @@ func ServerOptions(service string, addr *net.TCPAddr) []server.Option {
 //
 //   - A deadline on every call. Without one, a hung downstream ties up the caller's goroutines
 //     until it falls over too.
-//   - Retries on timeouts, at most 2, with jittered backoff and a 3 s total budget. Safe here only
-//     because every RPC in Vault is idempotent (keys, conditional updates). Retrying a
-//     non-idempotent call can double-apply it.
-//   - A retry breaker: once more than 10% of calls are failing, stop retrying. During an outage,
-//     retries would multiply load on a service that's already struggling (a retry storm).
 //   - A circuit breaker per method (see circuitBreaker).
-//     RPC_CIRCUIT_BREAKER=off disables it, for comparing behaviour in chaos tests.
+//
+// Retries are not configured here: callers use Retry (retry.go). Kitex's built-in failure retry
+// copies only the success field of the final result back to the caller (v0.16.3), so declared
+// Thrift exceptions (OrderError, PaymentError...) came back as a nil response with a nil error.
+//
+//	RPC_CIRCUIT_BREAKER=off disables it, for comparing behaviour in chaos tests.
 func ClientOptions(caller, hostPort string) []client.Option {
-	policy := retry.NewFailurePolicy()
-	policy.WithMaxRetryTimes(2)
-	policy.WithRandomBackOff(10, 50)
-	policy.WithMaxDurationMS(3000)
-	policy.WithRetryBreaker(0.1)
-
 	opts := []client.Option{
 		client.WithHostPorts(hostPort),
 		client.WithClientBasicInfo(&rpcinfo.EndpointBasicInfo{ServiceName: caller}),
 		client.WithSuite(tracing.NewClientSuite()),
 		client.WithRPCTimeout(2 * time.Second),
 		client.WithConnectTimeout(500 * time.Millisecond),
-		client.WithFailureRetry(policy),
 	}
 	if Env("RPC_CIRCUIT_BREAKER", "on") != "off" {
 		opts = append(opts, circuitBreaker())

@@ -3,6 +3,14 @@
 Go microservices for an order → payment flow. User PII is encrypted per user, every PII access is written to a
 tamper-evident audit log, and deleting a user makes that user's data unreadable everywhere (crypto-shredding).
 
+**Stack:** Go · CloudWeGo Hertz (HTTP) and Kitex (RPC) · Postgres · Kafka (Redpanda) · OpenTelemetry + Jaeger ·
+Prometheus + Grafana · k6 · Docker Compose · GitHub Actions
+
+![Grafana dashboard during a chaos test](docs/dashboard.png)
+*The dashboard mid-way through `make chaos` at 300 checkouts/s: latency and database connection waits spike while
+Postgres is frozen, the circuit breaker fails calls fast, the outbox holds ~14k events while Kafka is down and then
+drains to zero, and the audit chain stays intact. Afterwards: 0 double charges, 0 lost events.*
+
 ```
 Client → gateway (Hertz: JWT + roles, rate limit, request IDs)
             │ RPC
@@ -28,6 +36,7 @@ curl -i -X POST localhost:8080/v1/checkout \
   -H 'Content-Type: application/json' -d '{"amount_cents": 1999}'
 
 make test                   # unit + integration tests (needs `make up`)
+make e2e                    # 32-check end-to-end smoke test against the running services
 make load                   # k6 load test at a fixed rate (needs `make run`)
 make bench                  # latency, commits and WAL per checkout at 100-800 req/s
 make chaos                  # break Postgres, Kafka and payment under load, then check consistency
@@ -101,8 +110,9 @@ analytics pipeline, which inserted one event per commit; the same design made an
 ## Resilience
 
 - **Timeouts** on every RPC (2 s, 0.5 s to connect).
-- **Retries on timeout**, at most 2, with jittered backoff, only because every RPC is idempotent. A retry breaker
-  stops retrying once more than 10% of calls fail, so retries can't pile onto an outage.
+- **Explicit retries on timeout** (`platform.Retry`), at most 2, with jittered backoff and no new retry after
+  2.5 s; safe only because every RPC is idempotent. A **retry budget** (as in gRPC retry throttling) caps retries
+  at about 10% of traffic, so an outage can't turn into a retry storm.
 - **Circuit breaker per method** (for example `gateway/payment/Charge`): trips at 50% failures over at least 100
   calls in 10 s, then probes every 2 s. State changes are logged, and fast failures are counted in
   `gateway_upstream_failures_total{reason="circuit_open"}`.
@@ -118,11 +128,16 @@ analytics pipeline, which inserted one event per commit; the same design made an
 | Events stuck in the outbox | 0 |
 | Events missing from analytics | 0 |
 | Checkout during the Kafka outage | unaffected (events waited in the outbox) |
+| Recovery after the Postgres freeze and after payment restarts | next 10 s window |
+| Checkout p99 over the whole run | 2.0 s (was 4.0 s with Kitex's built-in retry) |
 
-Every check passed with the circuit breaker on and off. With it on, about 8% fewer checkouts failed. Tail latency
-was the same either way (4.0 s max: a 2 s timeout plus one retry during the database freeze), because the worst
-waits happen before enough calls have failed to trip the breaker. A breaker pays off most against a dependency
-that is slow rather than down.
+The retry budget is why p99 halved: during the database freeze it allowed 185 retries and denied 1,358, so most
+requests failed after one timeout instead of waiting out two. An earlier run with the circuit breaker switched
+off had about 8% more failed checkouts and the same tail latency: the worst waits happen before enough calls have
+failed to trip the breaker, which pays off most against a dependency that is slow rather than down.
+
+**CI** starts Postgres, Redpanda and Jaeger, runs every test with `VAULT_INTEGRATION=1` (a missing database fails
+the build instead of skipping tests), then starts all five services and runs the end-to-end smoke test.
 
 **Bugs these tests found** (all fixed):
 - **Stopped pipelines never exited.** With `BlockRebalanceOnPoll`, a poll interrupted by shutdown never called
@@ -132,6 +147,11 @@ that is slow rather than down.
   looked expired and 20 concurrent retries all called the payment provider. The check now runs entirely in Postgres.
 - **Jaeger ran out of memory** at ~1,000 req/s with 100% sampling (about 40k spans/s); it now keeps the newest 20k traces.
 - **A service that couldn't bind its admin port kept running** with no health checks or metrics. It now fails to start.
+- **Kitex's built-in retry lost business errors.** With it enabled, a declared Thrift exception (key reused,
+  not found) reached the gateway as a nil response with a nil error, and the gateway crashed on it: a 422 became a
+  500. Found by the end-to-end test; unit tests use fake clients and couldn't see it. Kitex v0.16.3 copies only the
+  success field of the final attempt's result. Retries are now explicit in the gateway, with a regression test that
+  runs a real Kitex client and server.
 - **The circuit breaker kept checkout failing ~9 s after payment recovered** (Kitex's built-in suite waits 5 s
   before probing). Rebuilt from the same parts with a 2 s cooling period.
 
@@ -156,6 +176,7 @@ that is slow rather than down.
 - **Support access is allowed, but never silent:** it needs a staff role and a reason, both of which are audited.
 - **Business errors aren't failures:** RPC metrics split outcomes into `ok`, `business_error` (not found, key reused: expected answers) and `error` (the service failing). Alerts fire only on `error`, so a client sending bad requests doesn't page anyone.
 - **Route patterns as metric labels, never raw paths:** `/v1/orders/:id`, not `/v1/orders/<uuid>`. One time series per order ID would grow without bound and take down Prometheus.
+- **Retries are explicit, and budgeted:** the gateway decides what to retry (timeouts only), not the RPC framework. See Resilience.
 - **Time comparisons use one clock:** the payment lease is checked with Postgres's `now()` against the `created_at` Postgres wrote, never against a service's clock.
 - **Latency buckets densest around the SLO:** percentiles are interpolated within a histogram bucket, so p99 is only as precise as the bucket it falls in. Counters also start at zero for every known label, so the first event registers as an increase.
 
@@ -163,7 +184,7 @@ that is slow rather than down.
 - All services share one Postgres database for local dev; in production each service would own its own database.
 - A payment stuck PENDING is only resolved when the client retries. A background reconciliation job would fix this without waiting for the client.
 - The pipeline writes one batch at a time from a single consumer. One goroutine per partition, or more consumers in the group, would scale it further.
-- Retrying on timeout doubles the worst case during a full outage (2 s + 2 s). A shorter per-attempt timeout would cap it, at the cost of more false timeouts under load.
+- The first requests into a full outage still wait up to ~4 s (a timeout plus one retry) before the retry budget empties. A shorter per-attempt timeout would cap it, at the cost of more false timeouts under load.
 - Benchmarks run on one laptop, where background work (autovacuum, checkpoints, other containers) makes tail latency vary several-fold between identical runs.
 - One active relay caps outbox throughput at a single publisher. Fine at this scale; beyond that, partition the outbox by user and run one relay per shard.
 - `user_keys` lives in the same Postgres as everything else. A database backup therefore contains the keys, and restoring an old backup would bring back a deleted user's key. In production the keys go in a separate store (a KMS, or a key database with short backup retention), so data backups never include them.
@@ -176,6 +197,5 @@ that is slow rather than down.
 - The user service re-verifies the whole audit chain every minute, so the check gets slower as the log grows. Verifying incrementally from the last checkpoint would fix that.
 
 ## Roadmap
-- CI with Postgres and Redpanda, so integration tests run on every push
 - A chaos scenario for a slow (not dead) dependency, where a circuit breaker matters most
 - A reconciliation job that finishes checkouts abandoned after a successful charge

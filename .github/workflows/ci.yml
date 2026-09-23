@@ -1,12 +1,41 @@
 name: ci
 on: [push, pull_request]
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - run: go vet ./...
-      - run: go test ./... -race -count=1
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Start Postgres, Redpanda and Jaeger
+        run: |
+          docker compose up -d postgres redpanda jaeger
+          for i in $(seq 1 60); do docker compose exec -T postgres pg_isready -U vault && break; sleep 2; done
+          for i in $(seq 1 60); do docker compose exec -T redpanda rpk cluster health | grep -q 'Healthy:.*true' && break; sleep 2; done
+          make topics
+
+      - name: Unit and integration tests
+        # VAULT_INTEGRATION=1 turns "database not reachable" from a skip into a failure.
+        env:
+          VAULT_INTEGRATION: "1"
+        run: go test ./... -race -count=1
+
+      - name: Start the services
+        run: |
+          make build
+          mkdir -p logs
+          for s in order payment user gateway pipeline; do nohup bin/$s > logs/$s.log 2>&1 & done
+
+      - name: End-to-end smoke test
+        run: ./scripts/e2e.sh
+
+      - name: Service logs
+        if: failure()
+        run: tail -n 50 logs/*.log

@@ -1,4 +1,4 @@
-.PHONY: up down logs psql topics build run test lint load bench chaos
+.PHONY: up down logs psql topics build run test e2e lint load bench chaos
 
 up:        ## start infra (postgres, redpanda, jaeger, prometheus, grafana)
 	docker compose up -d
@@ -23,6 +23,9 @@ run: build ## start all services locally (Ctrl-C stops all)
 
 test:
 	go test ./... -race -count=1
+
+e2e:       ## end-to-end smoke test against running services (needs `make run`)
+	./scripts/e2e.sh
 
 lint:
 	go vet ./...

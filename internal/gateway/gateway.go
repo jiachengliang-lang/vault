@@ -17,6 +17,8 @@ import (
 	"vault/kitex_gen/payment/paymentservice"
 	userapi "vault/kitex_gen/user"
 	"vault/kitex_gen/user/userservice"
+
+	"vault/internal/platform"
 )
 
 const maxKeyLen = 128
@@ -25,10 +27,11 @@ type Gateway struct {
 	orders   orderservice.Client
 	payments paymentservice.Client
 	users    userservice.Client
+	retries  *platform.RetryBudget // shared by every downstream call: retries stay under ~10% of traffic
 }
 
 func New(orders orderservice.Client, payments paymentservice.Client, users userservice.Client) *Gateway {
-	return &Gateway{orders: orders, payments: payments, users: users}
+	return &Gateway{orders: orders, payments: payments, users: users, retries: platform.NewRetryBudget(0.1, 10)}
 }
 
 // Register mounts the API. Health checks stay outside auth so load balancers can reach them.
@@ -58,8 +61,8 @@ type orderView struct {
 
 // Checkout creates an order, charges it, and records the outcome.
 //
-// Every step is idempotent, so a client that times out can simply retry with the same
-// Idempotency-Key: the order step returns the same order, the charge step returns the same
+// Every step is idempotent, so a step that times out is retried here, and a client that gets a 503
+// can simply retry with the same Idempotency-Key: the order step returns the same order, the charge step returns the same
 // payment (the key for the charge is the order ID, so an order is charged at most once),
 // and the status update is a no-op if already applied.
 func (g *Gateway) Checkout(ctx context.Context, c *app.RequestContext) {
@@ -75,8 +78,10 @@ func (g *Gateway) Checkout(ctx context.Context, c *app.RequestContext) {
 		return
 	}
 
-	created, err := g.orders.CreateOrder(ctx, &orderapi.CreateOrderRequest{
-		UserId: userID, AmountCents: req.AmountCents, IdempotencyKey: key,
+	created, err := platform.Retry(ctx, g.retries, func() (*orderapi.CreateOrderResponse, error) {
+		return g.orders.CreateOrder(ctx, &orderapi.CreateOrderRequest{
+			UserId: userID, AmountCents: req.AmountCents, IdempotencyKey: key,
+		})
 	})
 	if err != nil {
 		g.checkoutFailed(ctx, c, "create order", err)
@@ -97,8 +102,10 @@ func (g *Gateway) Checkout(ctx context.Context, c *app.RequestContext) {
 		return
 	}
 
-	charged, err := g.payments.Charge(ctx, &paymentapi.ChargeRequest{
-		OrderId: o.OrderId, AmountCents: o.AmountCents, IdempotencyKey: o.OrderId,
+	charged, err := platform.Retry(ctx, g.retries, func() (*paymentapi.ChargeResponse, error) {
+		return g.payments.Charge(ctx, &paymentapi.ChargeRequest{
+			OrderId: o.OrderId, AmountCents: o.AmountCents, IdempotencyKey: o.OrderId,
+		})
 	})
 	if err != nil {
 		g.checkoutFailed(ctx, c, "charge", err)
@@ -109,7 +116,9 @@ func (g *Gateway) Checkout(ctx context.Context, c *app.RequestContext) {
 	if charged.Payment.Status != "SUCCEEDED" {
 		status = "FAILED"
 	}
-	updated, err := g.orders.UpdateStatus(ctx, &orderapi.UpdateStatusRequest{OrderId: o.OrderId, Status: status})
+	updated, err := platform.Retry(ctx, g.retries, func() (*orderapi.UpdateStatusResponse, error) {
+		return g.orders.UpdateStatus(ctx, &orderapi.UpdateStatusRequest{OrderId: o.OrderId, Status: status})
+	})
 	if err != nil {
 		g.checkoutFailed(ctx, c, "update order", err)
 		return
@@ -129,7 +138,9 @@ func (g *Gateway) Checkout(ctx context.Context, c *app.RequestContext) {
 // GetOrder returns 404 for other users' orders instead of 403, so callers can't
 // probe which order IDs exist.
 func (g *Gateway) GetOrder(ctx context.Context, c *app.RequestContext) {
-	resp, err := g.orders.GetOrder(ctx, &orderapi.GetOrderRequest{OrderId: c.Param("id")})
+	resp, err := platform.Retry(ctx, g.retries, func() (*orderapi.GetOrderResponse, error) {
+		return g.orders.GetOrder(ctx, &orderapi.GetOrderRequest{OrderId: c.Param("id")})
+	})
 	if err != nil {
 		g.writeUpstreamError(ctx, c, "get order", err)
 		return

@@ -7,6 +7,8 @@ import (
 	"github.com/cloudwego/hertz/pkg/app"
 
 	userapi "vault/kitex_gen/user"
+
+	"vault/internal/platform"
 )
 
 const minReasonLen = 10
@@ -30,9 +32,11 @@ func (g *Gateway) PutProfile(ctx context.Context, c *app.RequestContext) {
 		return
 	}
 	userID := c.GetString(ctxUserID)
-	resp, err := g.users.UpsertProfile(ctx, &userapi.UpsertProfileRequest{
-		UserId: userID, Email: req.Email, Address: &req.Address,
-		Accessor: &userapi.Accessor{Actor: "user:" + userID, Reason: "self-service profile update"},
+	resp, err := platform.Retry(ctx, g.retries, func() (*userapi.UpsertProfileResponse, error) {
+		return g.users.UpsertProfile(ctx, &userapi.UpsertProfileRequest{
+			UserId: userID, Email: req.Email, Address: &req.Address,
+			Accessor: &userapi.Accessor{Actor: "user:" + userID, Reason: "self-service profile update"},
+		})
 	})
 	if err != nil {
 		g.writeUpstreamError(ctx, c, "upsert profile", err)
@@ -44,9 +48,11 @@ func (g *Gateway) PutProfile(ctx context.Context, c *app.RequestContext) {
 // GetProfile returns the caller's own profile.
 func (g *Gateway) GetProfile(ctx context.Context, c *app.RequestContext) {
 	userID := c.GetString(ctxUserID)
-	resp, err := g.users.GetProfile(ctx, &userapi.GetProfileRequest{
-		UserId:   userID,
-		Accessor: &userapi.Accessor{Actor: "user:" + userID, Reason: "self-service profile view"},
+	resp, err := platform.Retry(ctx, g.retries, func() (*userapi.GetProfileResponse, error) {
+		return g.users.GetProfile(ctx, &userapi.GetProfileRequest{
+			UserId:   userID,
+			Accessor: &userapi.Accessor{Actor: "user:" + userID, Reason: "self-service profile view"},
+		})
 	})
 	if err != nil {
 		g.writeUpstreamError(ctx, c, "get profile", err)
@@ -61,9 +67,11 @@ func (g *Gateway) GetProfile(ctx context.Context, c *app.RequestContext) {
 // is retried on timeout, and a retry after a delete that did commit would otherwise report 404.
 func (g *Gateway) DeleteMe(ctx context.Context, c *app.RequestContext) {
 	userID := c.GetString(ctxUserID)
-	_, err := g.users.DeleteUser(ctx, &userapi.DeleteUserRequest{
-		UserId:   userID,
-		Accessor: &userapi.Accessor{Actor: "user:" + userID, Reason: "user-requested deletion"},
+	_, err := platform.Retry(ctx, g.retries, func() (*userapi.DeleteUserResponse, error) {
+		return g.users.DeleteUser(ctx, &userapi.DeleteUserRequest{
+			UserId:   userID,
+			Accessor: &userapi.Accessor{Actor: "user:" + userID, Reason: "user-requested deletion"},
+		})
 	})
 	var ue *userapi.UserError
 	if errors.As(err, &ue) && ue.Code == 404 {
@@ -85,9 +93,11 @@ func (g *Gateway) SupportGetProfile(ctx context.Context, c *app.RequestContext) 
 		abort(c, 400, "a reason of at least 10 characters is required, e.g. ?reason=ticket-4821")
 		return
 	}
-	resp, err := g.users.GetProfile(ctx, &userapi.GetProfileRequest{
-		UserId:   c.Param("id"),
-		Accessor: &userapi.Accessor{Actor: "support:" + c.GetString(ctxUserID), Reason: reason},
+	resp, err := platform.Retry(ctx, g.retries, func() (*userapi.GetProfileResponse, error) {
+		return g.users.GetProfile(ctx, &userapi.GetProfileRequest{
+			UserId:   c.Param("id"),
+			Accessor: &userapi.Accessor{Actor: "support:" + c.GetString(ctxUserID), Reason: reason},
+		})
 	})
 	if err != nil {
 		g.writeUpstreamError(ctx, c, "support get profile", err)

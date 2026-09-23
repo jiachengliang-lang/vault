@@ -13,6 +13,7 @@ import (
 	"github.com/cloudwego/hertz/pkg/common/ut"
 	"github.com/cloudwego/hertz/pkg/route"
 	"github.com/cloudwego/kitex/client/callopt"
+	"github.com/cloudwego/kitex/pkg/kerrors"
 	"github.com/google/uuid"
 
 	orderapi "vault/kitex_gen/order"
@@ -71,10 +72,11 @@ func clone(o *orderapi.Order) *orderapi.Order { c := *o; return &c }
 
 // fakePayments succeeds up to $10,000, declines above, and can be made unavailable.
 type fakePayments struct {
-	mu      sync.Mutex
-	charges map[string]*paymentapi.Payment
-	calls   int
-	down    bool
+	mu          sync.Mutex
+	charges     map[string]*paymentapi.Payment
+	calls       int
+	down        bool
+	timeoutOnce bool // the charge commits, but the response times out on the way back
 }
 
 func (f *fakePayments) Charge(_ context.Context, req *paymentapi.ChargeRequest, _ ...callopt.Option) (*paymentapi.ChargeResponse, error) {
@@ -93,6 +95,10 @@ func (f *fakePayments) Charge(_ context.Context, req *paymentapi.ChargeRequest, 
 	}
 	p := &paymentapi.Payment{PaymentId: uuid.NewString(), OrderId: req.OrderId, AmountCents: req.AmountCents, Status: status}
 	f.charges[req.IdempotencyKey] = p
+	if f.timeoutOnce {
+		f.timeoutOnce = false
+		return nil, kerrors.ErrRPCTimeout
+	}
 	return &paymentapi.ChargeResponse{Payment: p}, nil
 }
 
@@ -226,6 +232,20 @@ func TestCheckoutRecoversAfterPaymentOutage(t *testing.T) {
 	}
 	if n := len(h.orders.byID); n != 1 {
 		t.Errorf("%d orders created, want 1", n)
+	}
+}
+
+// The charge commits but its response is lost to a timeout. The gateway retries with the same
+// idempotency key, gets the original payment back, and the customer is charged once.
+func TestCheckoutRetriesATimedOutCharge(t *testing.T) {
+	h := newHarness(t, nil)
+	h.payments.timeoutOnce = true
+	resp := h.checkout(token(t, uuid.New()), "k1", 1999)
+	if resp.Code != 201 || !strings.Contains(resp.Body.String(), `"status":"PAID"`) {
+		t.Fatalf("got %d %s, want 201 PAID after a retried charge", resp.Code, resp.Body.String())
+	}
+	if h.payments.calls != 1 {
+		t.Errorf("charged %d times, want 1", h.payments.calls)
 	}
 }
 
