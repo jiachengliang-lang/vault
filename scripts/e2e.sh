@@ -61,7 +61,7 @@ call GET /v1/me/profile "$TOKEN"; expect "profile after delete" 404
 call DELETE /v1/me "$TOKEN";      expect "second delete is idempotent" 204
 [ "$(q "SELECT string_agg(action, ',' ORDER BY seq) FROM audit_log WHERE subject_id = '$USER_ID'")" = "WRITE_PII,READ_PII,READ_PII,DELETE_USER" ] \
   && ok "every PII access is audited" || fail "audit trail: $(q "SELECT string_agg(action, ',' ORDER BY seq) FROM audit_log WHERE subject_id = '$USER_ID'")"
-curl -s localhost:8083/audit/verify | json '["ok"]' | grep -q True && ok "audit chain verifies" || fail "audit chain broken"
+[ "$(curl -s localhost:8083/audit/verify | json '["ok"]')" = True ] && ok "audit chain verifies" || fail "audit chain broken"
 
 echo "== Events"
 for _ in $(seq 1 30); do
@@ -73,7 +73,10 @@ done
   && ok "analytics holds no raw user IDs" || fail "raw user ID in analytics"
 
 echo "== Metrics"
-curl -s localhost:8090/metrics | grep -q '^checkout_outcomes_total{outcome="paid"} [1-9]' && ok "gateway exports checkout metrics" || fail "no checkout metrics"
-curl -s localhost:8081/metrics | grep -q '^rpc_server_requests_total' && ok "order service exports RPC metrics" || fail "no RPC metrics"
+# Save the output before grepping: with pipefail, `curl | grep -q` can fail after a match, because
+# grep exits early and curl gets SIGPIPE writing the rest.
+gw=$(curl -s localhost:8090/metrics); order=$(curl -s localhost:8081/metrics)
+grep -q '^checkout_outcomes_total{outcome="paid"} [1-9]' <<<"$gw" && ok "gateway exports checkout metrics" || fail "no checkout metrics"
+grep -q '^rpc_server_requests_total' <<<"$order" && ok "order service exports RPC metrics" || fail "no RPC metrics"
 
 echo; echo "All $pass checks passed."
