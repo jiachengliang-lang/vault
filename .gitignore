@@ -1,0 +1,5 @@
+*.prof
+/bin/
+.env
+loadtest/tokens.json
+.DS_Store
