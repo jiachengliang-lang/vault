@@ -6,10 +6,24 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
+)
+
+var (
+	auditEntries = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "audit_entries_total",
+		Help: "PII accesses recorded in the audit log, by action and actor type (user, support).",
+	}, []string{"action", "actor_type"})
+	chainValid = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "audit_chain_valid",
+		Help: "1 if the last audit chain verification passed, 0 if it found tampering.",
+	})
 )
 
 const (
@@ -19,6 +33,16 @@ const (
 
 	auditLockID = 7_700_002
 )
+
+// Counters start at 0 for every known label set. Prometheus can't compute an increase for a series
+// whose first sample is already 1, so without this the first support access would never show up.
+func init() {
+	for _, action := range []string{ActionReadPII, ActionWritePII, ActionDeleteUser} {
+		for _, actor := range []string{"user", "support"} {
+			auditEntries.WithLabelValues(action, actor)
+		}
+	}
+}
 
 // AuditEntry records who touched whose PII, and why.
 type AuditEntry struct {
@@ -85,6 +109,8 @@ func appendAudit(ctx context.Context, tx pgx.Tx, actor, action string, subject u
 	if err != nil {
 		return fmt.Errorf("write audit entry: %w", err)
 	}
+	actorType, _, _ := strings.Cut(actor, ":")
+	auditEntries.WithLabelValues(action, actorType).Inc()
 	return nil
 }
 
@@ -103,7 +129,16 @@ type Querier interface {
 }
 
 // VerifyAudit walks the whole chain and recomputes every hash.
-func VerifyAudit(ctx context.Context, q Querier) (VerifyResult, error) {
+func VerifyAudit(ctx context.Context, q Querier) (res VerifyResult, err error) {
+	defer func() {
+		switch {
+		case err != nil:
+		case res.OK:
+			chainValid.Set(1)
+		default:
+			chainValid.Set(0)
+		}
+	}()
 	rows, err := q.Query(ctx, `
 		SELECT seq, actor, action, subject_id, reason, ts, prev_hash, hash
 		FROM audit_log ORDER BY seq`)
@@ -112,7 +147,7 @@ func VerifyAudit(ctx context.Context, q Querier) (VerifyResult, error) {
 	}
 	defer rows.Close()
 
-	res := VerifyResult{OK: true, HeadHash: genesisHash}
+	res = VerifyResult{OK: true, HeadHash: genesisHash}
 	for rows.Next() {
 		var e AuditEntry
 		if err := rows.Scan(&e.Seq, &e.Actor, &e.Action, &e.SubjectID, &e.Reason, &e.TS, &e.PrevHash, &e.Hash); err != nil {

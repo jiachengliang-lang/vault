@@ -34,7 +34,7 @@ func (g *Gateway) PutProfile(ctx context.Context, c *app.RequestContext) {
 		Accessor: &userapi.Accessor{Actor: "user:" + userID, Reason: "self-service profile update"},
 	})
 	if err != nil {
-		g.writeUpstreamError(c, "upsert profile", err)
+		g.writeUpstreamError(ctx, c, "upsert profile", err)
 		return
 	}
 	writeProfile(c, resp.Profile)
@@ -48,7 +48,7 @@ func (g *Gateway) GetProfile(ctx context.Context, c *app.RequestContext) {
 		Accessor: &userapi.Accessor{Actor: "user:" + userID, Reason: "self-service profile view"},
 	})
 	if err != nil {
-		g.writeUpstreamError(c, "get profile", err)
+		g.writeUpstreamError(ctx, c, "get profile", err)
 		return
 	}
 	writeProfile(c, resp.Profile)
@@ -62,7 +62,7 @@ func (g *Gateway) DeleteMe(ctx context.Context, c *app.RequestContext) {
 		Accessor: &userapi.Accessor{Actor: "user:" + userID, Reason: "user-requested deletion"},
 	})
 	if err != nil {
-		g.writeUpstreamError(c, "delete user", err)
+		g.writeUpstreamError(ctx, c, "delete user", err)
 		return
 	}
 	c.Status(204)
@@ -82,7 +82,7 @@ func (g *Gateway) SupportGetProfile(ctx context.Context, c *app.RequestContext) 
 		Accessor: &userapi.Accessor{Actor: "support:" + c.GetString(ctxUserID), Reason: reason},
 	})
 	if err != nil {
-		g.writeUpstreamError(c, "support get profile", err)
+		g.writeUpstreamError(ctx, c, "support get profile", err)
 		return
 	}
 	writeProfile(c, resp.Profile)

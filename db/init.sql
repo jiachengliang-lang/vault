@@ -36,6 +36,7 @@ CREATE TABLE outbox (
     topic        TEXT NOT NULL,
     key          TEXT NOT NULL,          -- partition key (user_id) -> per-user ordering
     payload      JSONB NOT NULL,
+    headers      JSONB NOT NULL DEFAULT '{}', -- trace context of the request that wrote the event
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     published_at TIMESTAMPTZ
 );

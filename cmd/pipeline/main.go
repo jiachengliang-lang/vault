@@ -27,6 +27,13 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	shutdownTracing, err := platform.InitTracing(ctx, "pipeline")
+	if err != nil {
+		log.Error("tracing", "err", err)
+		os.Exit(1)
+	}
+	defer shutdownTracing(context.Background())
+
 	pool, err := platform.NewPool(ctx, platform.Env("DATABASE_URL", platform.DefaultDatabaseURL))
 	if err != nil {
 		log.Error("startup failed", "err", err)

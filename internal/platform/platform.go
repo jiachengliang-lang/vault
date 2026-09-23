@@ -11,7 +11,9 @@ import (
 	"os"
 	"time"
 
+	"github.com/exaring/otelpgx"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 // Env returns the environment variable key, or def if it is unset.
@@ -23,8 +25,9 @@ func Env(key, def string) string {
 }
 
 // NewLogger returns a JSON logger tagged with the service name, and installs it as the default.
+// Log with the *Context variants (slog.ErrorContext) to get trace_id on the line.
 func NewLogger(service string) *slog.Logger {
-	l := slog.New(slog.NewJSONHandler(os.Stdout, nil)).With("service", service)
+	l := slog.New(traceHandler{slog.NewJSONHandler(os.Stdout, nil)}).With("service", service)
 	slog.SetDefault(l)
 	return l
 }
@@ -42,6 +45,8 @@ func NewPool(ctx context.Context, url string) (*pgxpool.Pool, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse database url: %w", err)
 	}
+	// Every query becomes a span, so a slow checkout's trace shows exactly which SQL was slow.
+	cfg.ConnConfig.Tracer = otelpgx.NewTracer()
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("create pool: %w", err)
@@ -61,10 +66,12 @@ type Route struct {
 	Handler http.HandlerFunc
 }
 
-// StartAdmin serves /healthz (liveness), /readyz (can we reach our dependencies?) and any extra
-// internal routes on a separate port from business traffic, one that's never exposed publicly.
+// StartAdmin serves /healthz (liveness), /readyz (can we reach our dependencies?), /metrics
+// (for Prometheus) and any extra internal routes on a separate port from business traffic,
+// one that's never exposed publicly.
 func StartAdmin(addr string, ready func(context.Context) error, routes ...Route) *http.Server {
 	mux := http.NewServeMux()
+	mux.Handle("GET /metrics", promhttp.Handler())
 	for _, r := range routes {
 		mux.HandleFunc(r.Pattern, r.Handler)
 	}

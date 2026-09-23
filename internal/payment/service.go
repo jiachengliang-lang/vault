@@ -9,7 +9,26 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
+
+	"vault/internal/platform"
 )
+
+var (
+	pspCalls = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "psp_calls_total",
+		Help: "Calls to the payment provider, by result: SUCCEEDED, DECLINED or error.",
+	}, []string{"result"})
+	pspDuration = platform.NewHistogram("psp_call_duration_seconds",
+		"Payment provider latency. Usually the slowest step in checkout.")
+)
+
+func init() {
+	for _, r := range []string{StatusSucceeded, StatusDeclined, "error"} {
+		pspCalls.WithLabelValues(r) // start at 0 so the first provider error shows up
+	}
+}
 
 var (
 	ErrKeyReuse   = errors.New("idempotency key already used for a different order or amount")
@@ -82,12 +101,16 @@ func (s *Service) Charge(ctx context.Context, orderID uuid.UUID, amount int64, k
 }
 
 func (s *Service) callPSP(ctx context.Context, p Payment, key string) (Payment, bool, error) {
+	start := time.Now()
 	status, err := s.psp.Charge(ctx, key, p.Amount)
+	pspDuration.WithLabelValues().Observe(time.Since(start).Seconds())
 	if err != nil {
+		pspCalls.WithLabelValues("error").Inc()
 		// Leave the row PENDING: we don't know whether the PSP charged. A retry after the
 		// lease expires re-asks the PSP with the same key and gets the real answer.
 		return Payment{}, false, err
 	}
+	pspCalls.WithLabelValues(status).Inc()
 	// WHERE status = PENDING: if two takeovers race, both got the same answer from the
 	// idempotent PSP, so whichever update lands second is simply a no-op.
 	_, err = s.db.Exec(ctx,

@@ -32,7 +32,7 @@ func New(orders orderservice.Client, payments paymentservice.Client, users users
 
 // Register mounts the API. Health checks stay outside auth so load balancers can reach them.
 func (g *Gateway) Register(r route.IRouter, secret []byte, limiter *RateLimiter) {
-	r.Use(RequestID())
+	r.Use(Metrics(), RequestID())
 	r.GET("/healthz", func(ctx context.Context, c *app.RequestContext) { c.String(200, "ok") })
 
 	v1 := r.Group("/v1", Auth(secret), limiter.Middleware())
@@ -78,7 +78,7 @@ func (g *Gateway) Checkout(ctx context.Context, c *app.RequestContext) {
 		UserId: userID, AmountCents: req.AmountCents, IdempotencyKey: key,
 	})
 	if err != nil {
-		g.writeUpstreamError(c, "create order", err)
+		g.checkoutFailed(ctx, c, "create order", err)
 		return
 	}
 	o := created.Order
@@ -91,6 +91,7 @@ func (g *Gateway) Checkout(ctx context.Context, c *app.RequestContext) {
 		if o.Status == "FAILED" {
 			code = 402
 		}
+		checkoutOutcomes.WithLabelValues("replayed").Inc()
 		g.writeOrder(c, code, o)
 		return
 	}
@@ -99,7 +100,7 @@ func (g *Gateway) Checkout(ctx context.Context, c *app.RequestContext) {
 		OrderId: o.OrderId, AmountCents: o.AmountCents, IdempotencyKey: o.OrderId,
 	})
 	if err != nil {
-		g.writeUpstreamError(c, "charge", err)
+		g.checkoutFailed(ctx, c, "charge", err)
 		return
 	}
 
@@ -109,17 +110,18 @@ func (g *Gateway) Checkout(ctx context.Context, c *app.RequestContext) {
 	}
 	updated, err := g.orders.UpdateStatus(ctx, &orderapi.UpdateStatusRequest{OrderId: o.OrderId, Status: status})
 	if err != nil {
-		g.writeUpstreamError(c, "update order", err)
+		g.checkoutFailed(ctx, c, "update order", err)
 		return
 	}
 
-	code := 201
+	code, outcome := 201, "paid"
 	switch {
 	case status == "FAILED":
-		code = 402
+		code, outcome = 402, "declined"
 	case created.Replayed:
-		code = 200
+		code, outcome = 200, "replayed"
 	}
+	checkoutOutcomes.WithLabelValues(outcome).Inc()
 	g.writeOrder(c, code, updated.Order)
 }
 
@@ -128,7 +130,7 @@ func (g *Gateway) Checkout(ctx context.Context, c *app.RequestContext) {
 func (g *Gateway) GetOrder(ctx context.Context, c *app.RequestContext) {
 	resp, err := g.orders.GetOrder(ctx, &orderapi.GetOrderRequest{OrderId: c.Param("id")})
 	if err != nil {
-		g.writeUpstreamError(c, "get order", err)
+		g.writeUpstreamError(ctx, c, "get order", err)
 		return
 	}
 	if resp.Order.UserId != c.GetString(ctxUserID) {
@@ -138,6 +140,14 @@ func (g *Gateway) GetOrder(ctx context.Context, c *app.RequestContext) {
 	g.writeOrder(c, 200, resp.Order)
 }
 
+// checkoutFailed writes the error and counts the checkout as unavailable if it was a 5xx.
+func (g *Gateway) checkoutFailed(ctx context.Context, c *app.RequestContext, op string, err error) {
+	g.writeUpstreamError(ctx, c, op, err)
+	if c.Response.StatusCode() >= 500 {
+		checkoutOutcomes.WithLabelValues("unavailable").Inc()
+	}
+}
+
 func (g *Gateway) writeOrder(c *app.RequestContext, code int, o *orderapi.Order) {
 	c.JSON(code, orderView{OrderID: o.OrderId, Status: o.Status, AmountCents: o.AmountCents, CreatedAt: o.CreatedAt})
 }
@@ -145,7 +155,7 @@ func (g *Gateway) writeOrder(c *app.RequestContext, code int, o *orderapi.Order)
 // writeUpstreamError maps business errors from downstream services to their HTTP code.
 // Anything else (timeout, connection refused, DB down) becomes 503: the client should
 // retry with the same Idempotency-Key, which is always safe.
-func (g *Gateway) writeUpstreamError(c *app.RequestContext, op string, err error) {
+func (g *Gateway) writeUpstreamError(ctx context.Context, c *app.RequestContext, op string, err error) {
 	var oe *orderapi.OrderError
 	var pe *paymentapi.PaymentError
 	var ue *userapi.UserError
@@ -160,7 +170,7 @@ func (g *Gateway) writeUpstreamError(c *app.RequestContext, op string, err error
 		}
 		abort(c, int(pe.Code), pe.Message)
 	default:
-		slog.Error("upstream call failed", "op", op, "request_id", c.GetString(ctxRequestID), "err", err)
+		slog.ErrorContext(ctx, "upstream call failed", "op", op, "request_id", c.GetString(ctxRequestID), "err", err)
 		c.Header("Retry-After", "1")
 		abort(c, 503, "temporarily unavailable, retry with the same Idempotency-Key")
 	}

@@ -19,8 +19,39 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/twmb/franz-go/pkg/kgo"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
+
+var (
+	recordsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "pipeline_records_total",
+		Help: "Records handled, by outcome: stored or dead_lettered.",
+	}, []string{"outcome"})
+	retriesTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "pipeline_retries_total",
+		Help: "Retries of transient failures, by operation. A steady rate means a dependency is unhealthy.",
+	}, []string{"op"})
+	// From the business event (order paid) to the row existing in analytics: how fresh analytics is.
+	endToEnd = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "pipeline_event_end_to_end_seconds",
+		Help:    "Time from the event occurring to it landing in analytics.",
+		Buckets: []float64{.05, .1, .25, .5, 1, 2.5, 5, 10, 30, 60, 300},
+	})
+)
+
+func init() {
+	// Start at 0 so the first dead letter shows up as an increase (see audit.go).
+	recordsTotal.WithLabelValues("stored")
+	recordsTotal.WithLabelValues("dead_lettered")
+	retriesTotal.WithLabelValues("analytics insert")
+	retriesTotal.WithLabelValues("dlq send")
+}
 
 // ErrPoison marks a message that can never be processed (bad JSON, missing fields).
 // Retrying won't help, so it goes to the dead-letter queue.
@@ -117,12 +148,56 @@ func NewProcessor(tok Tokenizer, sink Sink, dlq DLQ) *Processor {
 // Handle returns an error only if ctx is cancelled before the record is fully handled.
 // The caller must then not commit the offset, so the record is redelivered.
 func (p *Processor) Handle(ctx context.Context, rec *kgo.Record) error {
-	row, err := Transform(rec.Value, p.tok)
-	if err != nil {
-		slog.Warn("sending to DLQ", "topic", rec.Topic, "partition", rec.Partition, "offset", rec.Offset, "err", err)
-		return p.retry(ctx, "dlq send", func() error { return p.dlq.Send(ctx, rec, err) })
+	// Continue the trace of the request that produced this event (see outbox.Write).
+	ctx = otel.GetTextMapPropagator().Extract(ctx, headerCarrier(rec.Headers))
+	ctx, span := otel.Tracer("pipeline").Start(ctx, "process "+rec.Topic,
+		trace.WithSpanKind(trace.SpanKindConsumer),
+		trace.WithAttributes(
+			attribute.String("messaging.system", "kafka"),
+			attribute.Int("messaging.kafka.partition", int(rec.Partition)),
+			attribute.Int64("messaging.kafka.offset", rec.Offset),
+		))
+	defer span.End()
+
+	row, reason := Transform(rec.Value, p.tok)
+	if reason != nil {
+		slog.WarnContext(ctx, "sending to DLQ", "topic", rec.Topic, "partition", rec.Partition, "offset", rec.Offset, "err", reason)
+		span.SetStatus(codes.Error, reason.Error())
+		if err := p.retry(ctx, "dlq send", func() error { return p.dlq.Send(ctx, rec, reason) }); err != nil {
+			return err
+		}
+		recordsTotal.WithLabelValues("dead_lettered").Inc()
+		return nil
 	}
-	return p.retry(ctx, "analytics insert", func() error { return p.sink.Insert(ctx, row) })
+	span.SetAttributes(attribute.String("event.type", row.EventType))
+	if err := p.retry(ctx, "analytics insert", func() error { return p.sink.Insert(ctx, row) }); err != nil {
+		return err
+	}
+	recordsTotal.WithLabelValues("stored").Inc()
+	endToEnd.Observe(time.Since(row.TS).Seconds())
+	return nil
+}
+
+// headerCarrier lets OpenTelemetry read trace context from Kafka record headers.
+type headerCarrier []kgo.RecordHeader
+
+func (h headerCarrier) Get(key string) string {
+	for _, kv := range h {
+		if kv.Key == key {
+			return string(kv.Value)
+		}
+	}
+	return ""
+}
+
+func (h headerCarrier) Set(string, string) {}
+
+func (h headerCarrier) Keys() []string {
+	keys := make([]string, len(h))
+	for i, kv := range h {
+		keys[i] = kv.Key
+	}
+	return keys
 }
 
 // retry runs fn until it succeeds or ctx is cancelled, with exponential backoff and full jitter.
@@ -134,7 +209,8 @@ func (p *Processor) retry(ctx context.Context, op string, fn func() error) error
 		if err == nil {
 			return nil
 		}
-		slog.Warn("retrying", "op", op, "attempt", attempt, "err", err)
+		slog.WarnContext(ctx, "retrying", "op", op, "attempt", attempt, "err", err)
+		retriesTotal.WithLabelValues(op).Inc()
 		select {
 		case <-ctx.Done():
 			return ctx.Err()

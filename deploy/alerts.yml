@@ -1,0 +1,49 @@
+# Alert rules. Each one fires on a symptom users or auditors would notice, not on every blip:
+# `for:` requires the condition to hold for a while before firing.
+# View them at http://localhost:9090/alerts (routing to Slack/PagerDuty would need Alertmanager).
+groups:
+  - name: vault
+    rules:
+      - alert: ServiceDown
+        expr: up{job="vault"} == 0
+        for: 1m
+        annotations:
+          summary: "{{ $labels.service }} has been unreachable for 1 minute"
+
+      - alert: HighErrorRate
+        expr: |
+          sum(rate(http_requests_total{code=~"5.."}[5m]))
+            / clamp_min(sum(rate(http_requests_total{route!="/healthz"}[5m])), 1e-9) > 0.05
+        for: 2m
+        annotations:
+          summary: "More than 5% of API requests are failing (5xx)"
+
+      - alert: CheckoutSlow
+        expr: histogram_quantile(0.99, sum by (le) (rate(http_request_duration_seconds_bucket{route="/v1/checkout"}[5m]))) > 0.5
+        for: 5m
+        annotations:
+          summary: "Checkout p99 above 500 ms for 5 minutes"
+
+      - alert: OutboxStuck
+        expr: max(outbox_oldest_unpublished_age_seconds) > 60
+        for: 2m
+        annotations:
+          summary: "Events are not reaching Kafka (oldest unpublished event > 60 s)"
+
+      - alert: DeadLetters
+        expr: sum(increase(pipeline_records_total{outcome="dead_lettered"}[10m])) > 0
+        annotations:
+          summary: "Malformed events were dead-lettered: check order.events.dlq"
+
+      - alert: AuditChainBroken
+        expr: audit_chain_valid == 0
+        annotations:
+          summary: "Audit log verification failed: an entry was edited, deleted or reordered"
+
+      - alert: PaymentProviderErrors
+        expr: |
+          sum(rate(psp_calls_total{result="error"}[5m]))
+            / clamp_min(sum(rate(psp_calls_total[5m])), 1e-9) > 0.1
+        for: 2m
+        annotations:
+          summary: "More than 10% of payment provider calls are failing"

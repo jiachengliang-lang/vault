@@ -38,6 +38,7 @@ func RequestID() app.HandlerFunc {
 		}
 		c.Set(ctxRequestID, id)
 		c.Header(headerRequestID, id)
+		tagSpan(ctx, id)
 		c.Next(ctx)
 	}
 }

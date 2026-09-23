@@ -9,8 +9,6 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/cloudwego/kitex/pkg/rpcinfo"
-	"github.com/cloudwego/kitex/server"
 	"github.com/twmb/franz-go/pkg/kgo"
 
 	"vault/internal/order"
@@ -23,6 +21,13 @@ func main() {
 	log := platform.NewLogger("order")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	shutdownTracing, err := platform.InitTracing(ctx, "order")
+	if err != nil {
+		log.Error("tracing", "err", err)
+		os.Exit(1)
+	}
+	defer shutdownTracing(context.Background())
 
 	pool, err := platform.NewPool(ctx, platform.Env("DATABASE_URL", platform.DefaultDatabaseURL))
 	if err != nil {
@@ -55,8 +60,7 @@ func main() {
 	}
 	svr := orderservice.NewServer(
 		order.NewHandler(order.NewStore(pool)),
-		server.WithServiceAddr(addr),
-		server.WithServerBasicInfo(&rpcinfo.EndpointBasicInfo{ServiceName: "order"}),
+		platform.ServerOptions("order", addr)...,
 	)
 	log.Info("order service starting", "rpc", addr.String())
 	// Run blocks until SIGINT/SIGTERM, then drains in-flight requests before returning.

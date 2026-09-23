@@ -12,6 +12,8 @@ Client → gateway (Hertz: JWT + roles, rate limit, request IDs)
    │
    ▼ Kafka (Redpanda), keyed by user_id
  pipeline → redact/tokenize PII → analytics_events   (DLQ on poison messages)
+
+Observability: OpenTelemetry traces → Jaeger · Prometheus metrics + alerts → Grafana
 ```
 
 ## Run it
@@ -40,7 +42,20 @@ make load                   # k6 load test (needs `make run`)
 | DELETE | `/v1/me` | Crypto-shreds the account: 204, then every copy of the PII is unreadable |
 | GET | `/v1/support/users/:id/profile?reason=…` | Needs a `support` role token (`tokengen -role support`) and a reason; audited with both |
 
-Internal only (admin port): `GET localhost:8083/audit/verify` walks the audit hash chain.
+Internal only (admin ports): `/healthz`, `/readyz` and `/metrics` on every service (gateway 8090, order 8081,
+payment 8082, user 8083, pipeline 8084), plus `GET localhost:8083/audit/verify`, which walks the audit hash chain.
+
+## Observability
+
+| Tool | URL | What it shows |
+|---|---|---|
+| Grafana | http://localhost:3000 | The **Vault** dashboard (home page): checkout health, RPC latency and failures, payment provider, outbox and pipeline, PII access, Go runtime |
+| Jaeger | http://localhost:16686 | One trace per request, across gateway → order → payment → Kafka → pipeline, including every SQL query |
+| Prometheus | http://localhost:9090/alerts | Alert rules: service down, 5xx rate, checkout p99, outbox stuck, dead letters, audit chain broken, payment provider errors |
+
+- **Traces cross Kafka.** The relay publishes events later, from a background loop, so the outbox row stores the trace context of the request that wrote it and the relay sends it as Kafka headers. The pipeline's span joins the original checkout's trace.
+- **Logs link to traces.** Log lines written with a request context carry `trace_id` and `span_id`.
+- **RED metrics everywhere:** rate, errors and duration for every HTTP route and RPC method, plus business metrics (checkout outcomes, payment provider latency, outbox backlog and age, analytics freshness, PII accesses by action and actor type).
 
 ## Design decisions
 - **Idempotent checkout, end to end:** orders are unique on `(user_id, idempotency_key)`, a payment's key is its order ID (one charge per order), and status updates are no-ops when already applied. A client can retry any failure with the same key.
@@ -60,6 +75,9 @@ Internal only (admin port): `GET localhost:8083/audit/verify` walks the audit ha
 - **Blind index for email:** an HMAC of the normalized email enforces one account per email without decrypting every row.
 - **Hash-chained audit log, written in the same transaction as the PII access:** every read, write and delete records actor and reason. If the audit write fails, the access fails ("no audit, no access"). Editing, deleting or reordering any entry breaks the chain, and `/audit/verify` reports the first bad entry.
 - **Support access is allowed, but never silent:** it needs a staff role and a reason, both of which are audited.
+- **Business errors aren't failures:** RPC metrics split outcomes into `ok`, `business_error` (not found, key reused: expected answers) and `error` (the service failing). Alerts fire only on `error`, so a client sending bad requests doesn't page anyone.
+- **Route patterns as metric labels, never raw paths:** `/v1/orders/:id`, not `/v1/orders/<uuid>`. One time series per order ID would grow without bound and take down Prometheus.
+- **Latency buckets densest around the SLO:** percentiles are interpolated within a histogram bucket, so p99 is only as precise as the bucket it falls in. Counters also start at zero for every known label, so the first event registers as an increase.
 
 ## Known limitations
 - All services share one Postgres database for local dev; in production each service would own its own database.
@@ -72,8 +90,10 @@ Internal only (admin port): `GET localhost:8083/audit/verify` walks the audit ha
 - One outbox row for a Kafka topic that doesn't exist blocks the relay, because Kafka rejects the whole batch (this happened during development before `user.events` existed). A fix: move rows that fail permanently to a dead-letter table, the same way the pipeline handles poison messages.
 - On Go 1.27, `sonic` (fast JSON) falls back to `encoding/json` (see the startup warning). Pinning the toolchain to Go 1.26 would restore it.
 
+- Every request is traced (100% sampling). At production volume you'd sample a small fraction and keep every trace with an error.
+- The user service re-verifies the whole audit chain every minute, so the check gets slower as the log grows. Verifying incrementally from the last checkpoint would fix that.
+
 ## Roadmap
-- Observability: OpenTelemetry tracing across services and Kafka, Prometheus metrics, Grafana dashboard (Jaeger, Prometheus and Grafana already run in Docker Compose)
 - Load-test baseline, profiling with pprof, and a benchmark table
 - Circuit breakers, and chaos tests under load (`make chaos`)
 - CI with Postgres and Redpanda, so integration tests run on every push

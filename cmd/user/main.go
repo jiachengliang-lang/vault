@@ -13,9 +13,8 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
-	"github.com/cloudwego/kitex/pkg/rpcinfo"
-	"github.com/cloudwego/kitex/server"
 	"github.com/twmb/franz-go/pkg/kgo"
 
 	"vault/internal/outbox"
@@ -48,6 +47,13 @@ func main() {
 	}
 	index := user.NewBlindIndex([]byte(platform.Env("BLIND_INDEX_KEY", "dev-blind-index-key-change-me")))
 
+	shutdownTracing, err := platform.InitTracing(ctx, "user")
+	if err != nil {
+		log.Error("tracing", "err", err)
+		os.Exit(1)
+	}
+	defer shutdownTracing(context.Background())
+
 	pool, err := platform.NewPool(ctx, platform.Env("DATABASE_URL", platform.DefaultDatabaseURL))
 	if err != nil {
 		log.Error("startup failed", "err", err)
@@ -76,6 +82,24 @@ func main() {
 	})
 	defer admin.Shutdown(context.Background())
 
+	// Re-verify the audit chain every minute. audit_chain_valid drops to 0 on tampering, and an alert fires.
+	// This walks the whole chain, so its cost grows with the log; at scale you'd verify incrementally
+	// from the last checkpoint.
+	go func() {
+		t := time.NewTicker(time.Minute)
+		defer t.Stop()
+		for {
+			if res, err := store.Verify(ctx); err == nil && !res.OK {
+				log.Error("AUDIT CHAIN BROKEN", "seq", res.BrokenAt, "problem", res.Problem)
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+			}
+		}
+	}()
+
 	// Each service with an outbox runs a relay; the shared advisory lock keeps one active at a time.
 	producer, err := kgo.NewClient(kgo.SeedBrokers(strings.Split(platform.Env("KAFKA_BROKERS", platform.DefaultKafkaBrokers), ",")...))
 	if err != nil {
@@ -97,8 +121,7 @@ func main() {
 	}
 	svr := userservice.NewServer(
 		user.NewHandler(store),
-		server.WithServiceAddr(addr),
-		server.WithServerBasicInfo(&rpcinfo.EndpointBasicInfo{ServiceName: "user"}),
+		platform.ServerOptions("user", addr)...,
 	)
 	log.Info("user service starting", "rpc", addr.String())
 	if err := svr.Run(); err != nil {

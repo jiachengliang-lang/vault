@@ -8,8 +8,6 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/cloudwego/kitex/pkg/rpcinfo"
-	"github.com/cloudwego/kitex/server"
 
 	"vault/internal/payment"
 	"vault/internal/platform"
@@ -19,6 +17,13 @@ import (
 func main() {
 	log := platform.NewLogger("payment")
 	ctx := context.Background()
+
+	shutdownTracing, err := platform.InitTracing(ctx, "payment")
+	if err != nil {
+		log.Error("tracing", "err", err)
+		os.Exit(1)
+	}
+	defer shutdownTracing(context.Background())
 
 	pool, err := platform.NewPool(ctx, platform.Env("DATABASE_URL", platform.DefaultDatabaseURL))
 	if err != nil {
@@ -41,8 +46,7 @@ func main() {
 	}
 	svr := paymentservice.NewServer(
 		payment.NewHandler(payment.NewService(pool, psp)),
-		server.WithServiceAddr(addr),
-		server.WithServerBasicInfo(&rpcinfo.EndpointBasicInfo{ServiceName: "payment"}),
+		platform.ServerOptions("payment", addr)...,
 	)
 	log.Info("payment service starting", "rpc", addr.String(), "psp_latency_ms", latencyMS, "psp_failure_rate", failureRate)
 	if err := svr.Run(); err != nil {

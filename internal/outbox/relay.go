@@ -11,7 +11,26 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/twmb/franz-go/pkg/kgo"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
+)
+
+var (
+	publishedTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "outbox_published_total",
+		Help: "Events published from the outbox to Kafka.",
+	})
+	backlog = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "outbox_backlog",
+		Help: "Events written but not yet published. Should hover near 0; growth means Kafka or the relay is stuck.",
+	})
+	oldestAge = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "outbox_oldest_unpublished_age_seconds",
+		Help: "Age of the oldest unpublished event: how stale downstream consumers' view is.",
+	})
 )
 
 // relayLockID is an arbitrary constant shared by every relay instance, in every service.
@@ -19,12 +38,19 @@ const relayLockID = 7_700_001
 
 // Write adds an event to the outbox inside the caller's transaction.
 // key picks the Kafka partition: events with the same key stay in order.
+//
+// It also saves the current trace context. The relay publishes later, from a background loop
+// with no link to this request; the saved context travels as Kafka headers, so the consumer's
+// span joins the original request's trace.
 func Write(ctx context.Context, tx pgx.Tx, topic, key string, event any) error {
 	payload, err := json.Marshal(event)
 	if err != nil {
 		return err
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO outbox (topic, key, payload) VALUES ($1, $2, $3)`, topic, key, payload)
+	headers := propagation.MapCarrier{}
+	otel.GetTextMapPropagator().Inject(ctx, headers)
+	_, err = tx.Exec(ctx, `INSERT INTO outbox (topic, key, payload, headers) VALUES ($1, $2, $3, $4)`,
+		topic, key, payload, map[string]string(headers))
 	if err != nil {
 		return fmt.Errorf("write outbox event: %w", err)
 	}
@@ -54,11 +80,15 @@ func NewRelay(db *pgxpool.Pool, kafka *kgo.Client) *Relay {
 // Run publishes until ctx is cancelled. A full batch means there's a backlog, so it
 // loops immediately; otherwise it sleeps for Interval.
 func (r *Relay) Run(ctx context.Context) {
-	lastCleanup := time.Now()
+	lastCleanup, lastStats := time.Now(), time.Time{}
 	for {
 		n, err := r.PublishBatch(ctx)
 		if err != nil && ctx.Err() == nil {
 			slog.Warn("outbox relay: publish failed, will retry", "err", err)
+		}
+		if time.Since(lastStats) > 5*time.Second {
+			r.recordStats(ctx)
+			lastStats = time.Now()
 		}
 		if time.Since(lastCleanup) > time.Minute {
 			r.cleanup(ctx)
@@ -94,7 +124,7 @@ func (r *Relay) PublishBatch(ctx context.Context) (int, error) {
 	}
 
 	rows, err := tx.Query(ctx, `
-		SELECT id, topic, key, payload FROM outbox
+		SELECT id, topic, key, payload, headers FROM outbox
 		WHERE published_at IS NULL ORDER BY id LIMIT $1`, r.BatchSize)
 	if err != nil {
 		return 0, err
@@ -105,11 +135,16 @@ func (r *Relay) PublishBatch(ctx context.Context) (int, error) {
 		var id int64
 		var topic, key string
 		var payload []byte
-		if err := rows.Scan(&id, &topic, &key, &payload); err != nil {
+		var headers map[string]string
+		if err := rows.Scan(&id, &topic, &key, &payload, &headers); err != nil {
 			return 0, err
 		}
+		rec := &kgo.Record{Topic: topic, Key: []byte(key), Value: payload}
+		for k, v := range headers {
+			rec.Headers = append(rec.Headers, kgo.RecordHeader{Key: k, Value: []byte(v)})
+		}
 		ids = append(ids, id)
-		records = append(records, &kgo.Record{Topic: topic, Key: []byte(key), Value: payload})
+		records = append(records, rec)
 	}
 	if err := rows.Err(); err != nil {
 		return 0, err
@@ -126,7 +161,24 @@ func (r *Relay) PublishBatch(ctx context.Context) (int, error) {
 	if _, err := tx.Exec(ctx, `UPDATE outbox SET published_at = now() WHERE id = ANY($1)`, ids); err != nil {
 		return 0, fmt.Errorf("mark published: %w", err)
 	}
-	return len(records), tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return 0, err
+	}
+	publishedTotal.Add(float64(len(records)))
+	return len(records), nil
+}
+
+func (r *Relay) recordStats(ctx context.Context) {
+	var n int64
+	var age float64
+	err := r.db.QueryRow(ctx, `
+		SELECT count(*), COALESCE(EXTRACT(EPOCH FROM now() - min(created_at)), 0)
+		FROM outbox WHERE published_at IS NULL`).Scan(&n, &age)
+	if err != nil {
+		return
+	}
+	backlog.Set(float64(n))
+	oldestAge.Set(age)
 }
 
 func (r *Relay) cleanup(ctx context.Context) {
