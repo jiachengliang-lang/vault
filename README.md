@@ -14,25 +14,16 @@ What it does:
 Built with Go, CloudWeGo (Kitex and Hertz), PostgreSQL, Kafka (Redpanda), Docker Compose, OpenTelemetry,
 Prometheus and Grafana.
 
-![Grafana dashboard during a chaos test](docs/dashboard.png)
+## Services
 
-The dashboard during a chaos test, with Postgres frozen, Kafka down and the payment service killed, all under load.
+- `gateway` is the public HTTP API. It checks login tokens, rate limits, and runs checkout by calling the others.
+- `order` creates orders and records whether they were paid.
+- `payment` charges orders against a fake payment provider, making sure each order is charged once.
+- `user` stores encrypted profiles and the audit log.
+- `pipeline` reads order events from Kafka and writes them to the analytics table.
 
-## How it fits together
-
-```
-client
-  |
-gateway  (HTTP: auth, rate limiting)
-  |
-  +-- order service    ---> outbox ---> Kafka ---> pipeline ---> analytics table
-  +-- payment service
-  +-- user service     (encrypted profiles, audit log)
-```
-
-The gateway handles checkout by creating an order, charging it, then marking it paid or failed. Each step can be
-retried safely. Order events are written to an outbox table in the same transaction as the order, then a
-background relay publishes them to Kafka.
+Order events are saved in the same database transaction as the order itself, then published to Kafka in the
+background, so an order and its event can't get out of sync.
 
 ## Running it locally
 
@@ -57,6 +48,10 @@ curl -i -X POST localhost:8080/v1/checkout \
 Run the same command again and you get the same order back, with `Idempotent-Replayed: true`.
 
 Grafana is at http://localhost:3000 and Jaeger (traces) is at http://localhost:16686.
+
+![Grafana dashboard](docs/dashboard.png)
+
+Part of the Grafana dashboard with 200 checkouts a second running.
 
 ## API
 
