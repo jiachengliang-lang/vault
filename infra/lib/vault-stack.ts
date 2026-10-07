@@ -386,5 +386,10 @@ export class VaultStack extends Stack {
       description: 'Auto Scaling group of the ECS host (scripts/gateway-url.sh finds its public IP)',
     });
     new CfnOutput(this, 'LogGroup', { value: logGroup.logGroupName });
+    // For loadtest/aws-bench.sh: CPU metrics for the cluster and the database, and the security
+    // group a load generator's address is added to for the length of a test.
+    new CfnOutput(this, 'ClusterName', { value: cluster.clusterName });
+    new CfnOutput(this, 'DbInstance', { value: db.instanceIdentifier });
+    new CfnOutput(this, 'HostSecurityGroup', { value: hostSg.securityGroupId });
   }
 }

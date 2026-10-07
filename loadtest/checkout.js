@@ -5,11 +5,13 @@
 // (coordinated omission). Real users arrive independently of how slow we are; so does this test.
 //
 //   RATE=400 DURATION=30s k6 run loadtest/checkout.js
+//   GATEWAY=http://1.2.3.4:8080 RATE=100 k6 run loadtest/checkout.js   # somewhere other than localhost
 import http from 'k6/http';
 import { check } from 'k6';
 import { SharedArray } from 'k6/data';
 
 const tokens = new SharedArray('tokens', () => JSON.parse(open('./tokens.json')));
+const gateway = __ENV.GATEWAY || 'http://localhost:8080';
 
 export const options = {
   scenarios: {
@@ -29,7 +31,7 @@ export const options = {
 export default function () {
   // Random user per request: 500 users at 1,000 req/s is ~2 req/s each, under the per-user rate limit.
   const token = tokens[Math.floor(Math.random() * tokens.length)];
-  const res = http.post('http://localhost:8080/v1/checkout',
+  const res = http.post(`${gateway}/v1/checkout`,
     JSON.stringify({ amount_cents: 1999 }),
     { headers: {
       'Content-Type': 'application/json',

@@ -13,10 +13,21 @@ test('the deploy user gets only what the workflow uses', () => {
     .sort();
   expect(actions).toEqual([
     'cloudformation:DescribeStacks',
+    'cloudwatch:GetMetricStatistics',
+    'ec2:AuthorizeSecurityGroupIngress',
     'ec2:DescribeInstances',
+    'ec2:RevokeSecurityGroupIngress',
     'secretsmanager:GetSecretValue',
     'sts:AssumeRole',
   ]);
+});
+
+test("it can only open Vault's own security groups", () => {
+  const statements = Object.values(template.findResources('AWS::IAM::Policy')).flatMap(
+    (p) => p.Properties.PolicyDocument.Statement,
+  );
+  const sg = statements.find((st: { Action: string[] }) => [st.Action].flat().includes('ec2:AuthorizeSecurityGroupIngress'));
+  expect(sg.Condition).toEqual({ StringEquals: { 'aws:ResourceTag/aws:cloudformation:stack-name': 'Vault' } });
 });
 
 test('no access key in the template, where CloudFormation would keep a copy', () => {

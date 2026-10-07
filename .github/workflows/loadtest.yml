@@ -1,0 +1,80 @@
+name: loadtest
+
+# Checkout load test against Vault on AWS, from a GitHub runner, at increasing fixed rates. The
+# results table goes on the run's summary page. Vault has to be up (deploy workflow, Run workflow).
+on:
+  workflow_dispatch:
+    inputs:
+      rates:
+        description: Checkouts per second to try, in order
+        default: '50 100 200 400'
+      duration:
+        description: How long each rate runs
+        default: 60s
+
+permissions:
+  contents: read
+
+# Shares the deploy workflow's group, so a deploy never swaps containers out mid-test.
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-east-2
+
+jobs:
+  loadtest:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: grafana/setup-k6-action@v1
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Let this runner reach the gateway
+        run: |
+          SG=$(aws cloudformation describe-stacks --stack-name Vault --query "Stacks[0].Outputs[?OutputKey=='HostSecurityGroup'].OutputValue" --output text)
+          CIDR=$(curl -s https://checkip.amazonaws.com)/32
+          aws ec2 authorize-security-group-ingress --group-id "$SG" \
+            --ip-permissions "IpProtocol=tcp,FromPort=8080,ToPort=8080,IpRanges=[{CidrIp=$CIDR,Description=loadtest runner}]"
+          echo "SG=$SG" >> "$GITHUB_ENV"
+          echo "CIDR=$CIDR" >> "$GITHUB_ENV"
+
+      - name: Load test
+        env:
+          RATES: ${{ inputs.rates }}
+          DURATION: ${{ inputs.duration }}
+        run: |
+          JWT_SECRET=$(aws secretsmanager get-secret-value --secret-id vault/app --query SecretString --output text | jq -r .JWT_SECRET)
+          echo "::add-mask::$JWT_SECRET"
+          export JWT_SECRET
+          # shellcheck disable=SC2086 # RATES is a space-separated list
+          loadtest/aws-bench.sh $RATES | tee results.md
+          {
+            echo "## Checkout load test on AWS"
+            echo
+            echo "From a GitHub runner, $DURATION per rate. Host: one t4g.small; database: db.t4g.micro."
+            echo
+            cat results.md
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Close the gateway to this runner again
+        if: always() && env.SG != ''
+        run: |
+          aws ec2 revoke-security-group-ingress --group-id "$SG" \
+            --ip-permissions "IpProtocol=tcp,FromPort=8080,ToPort=8080,IpRanges=[{CidrIp=$CIDR}]"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: loadtest-results
+          path: results.md
+          if-no-files-found: ignore
