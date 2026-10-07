@@ -69,3 +69,13 @@ test('service-down alarms treat a missing task count as 0', () => {
     expect(a.Properties.Metrics.map((m: { Expression?: string }) => m.Expression)).toContain('FILL(tasks, 0)');
   }
 });
+
+// Otherwise an alarm created as soon as its own service is up looks back over minutes before the
+// service existed, and a fresh deploy pages for Kafka.
+test('alarms are created after all three services', () => {
+  const services = Object.keys(template.findResources('AWS::ECS::Service'));
+  expect(services).toHaveLength(3);
+  for (const a of alarms) {
+    for (const svc of services) expect(a.DependsOn).toContain(svc);
+  }
+});

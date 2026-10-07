@@ -268,6 +268,11 @@ export class VaultStack extends Stack {
     const runbook = (anchor: string) => `${RUNBOOK_URL}#${anchor}`;
     const notify = (alarm: cloudwatch.Alarm) => {
       alarm.addAlarmAction(new cw_actions.SnsAction(topic));
+      // Create alarms only once every service is up. Kafka is ready minutes before the services
+      // that wait for the database, and its alarm, created right away, looked back over minutes
+      // when the service didn't exist yet: filled with 0, that read as down, and every fresh
+      // deploy sent a false Kafka-down alarm.
+      alarm.node.addDependency(app.service, user.service, kafka);
     };
 
     // A service with no running task, for three minutes, so the gap while a deploy swaps one task

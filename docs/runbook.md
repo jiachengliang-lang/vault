@@ -24,7 +24,8 @@ things broke anyway, run the deploy workflow on the `deployed` tag's commit to g
 
 ## Service down
 
-**Means:** one of the ECS services (App, User or Kafka) has had no running task for 3 minutes. App down means the
+**Means:** one of the ECS services (App, User or Kafka) has had no running task for 3 minutes. Expect the email
+about 5 minutes in: ECS's task counts reach CloudWatch a couple of minutes late. App down means the
 API is down. User down means checkout still works but profiles don't. Kafka down means checkout still works and
 events wait in the outbox ([Outbox stuck](#outbox-stuck) will follow).
 
