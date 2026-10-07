@@ -14,9 +14,9 @@ jobs:
       - name: Vet
         run: go vet ./...
 
-      - name: Start Postgres, Redpanda and Jaeger
+      - name: Start Postgres, Redpanda, DynamoDB Local and Jaeger
         run: |
-          docker compose up -d postgres redpanda jaeger
+          docker compose up -d postgres redpanda dynamodb jaeger
           for i in $(seq 1 60); do docker compose exec -T postgres pg_isready -U vault && break; sleep 2; done
           for i in $(seq 1 60); do docker compose exec -T redpanda rpk cluster health | grep -q 'Healthy:.*true' && break; sleep 2; done
           make topics

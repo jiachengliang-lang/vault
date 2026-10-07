@@ -24,6 +24,13 @@ services:
       - --advertise-kafka-addr internal://redpanda:9092,external://localhost:19092
     ports: ["19092:19092"]
 
+  # Stand-in for the DynamoDB table that holds users' data keys on AWS. The services only use it
+  # when KEYS_TABLE is set; the tests always do.
+  dynamodb:
+    image: amazon/dynamodb-local:latest
+    command: ["-jar", "DynamoDBLocal.jar", "-inMemory", "-sharedDb"]
+    ports: ["8000:8000"]
+
   # Trace UI at http://localhost:16686, services send OTLP to :4317 (gRPC) / :4318 (HTTP)
   jaeger:
     image: jaegertracing/all-in-one:1.60

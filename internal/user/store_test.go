@@ -21,7 +21,8 @@ func newTestStore(t *testing.T) *Store {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return NewStore(platform.TestPool(t), keys, NewBlindIndex([]byte("test-index-key")))
+	pool := platform.TestPool(t)
+	return NewStore(pool, keys, NewPostgresKeyStore(pool), NewBlindIndex([]byte("test-index-key")))
 }
 
 func uniqueEmail() string {

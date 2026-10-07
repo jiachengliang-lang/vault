@@ -8,11 +8,12 @@ What it does:
 - Checkout is safe to retry. A double click, a timeout or a crash halfway through never charges anyone twice.
 - Order events go through Kafka into an analytics table, with user IDs swapped for tokens.
 - Emails and addresses are encrypted with a separate key per user. Deleting an account destroys that key, so every
-  copy of the user's data (including ones already sitting in Kafka or in backups) becomes unreadable.
+  copy of the user's data (including ones already sitting in Kafka or in backups) becomes unreadable. On AWS the
+  master key is in KMS and the per-user keys are in DynamoDB, apart from the data they protect.
 - Every read of personal data is recorded in an audit log that detects tampering.
 
 Built with Go, CloudWeGo (Kitex and Hertz), PostgreSQL, Kafka (Redpanda), Docker Compose, OpenTelemetry,
-Prometheus and Grafana.
+Prometheus and Grafana. On AWS: ECS, RDS, KMS and DynamoDB, set up with the CDK.
 
 ## Services
 
@@ -52,6 +53,12 @@ Grafana is at http://localhost:3000 and Jaeger (traces) is at http://localhost:1
 ![Grafana dashboard](docs/dashboard.png)
 
 Part of the Grafana dashboard with 200 checkouts a second running.
+
+## Running it on AWS
+
+`infra/` describes the AWS setup with the CDK: ECS on one small EC2 host, RDS Postgres, KMS and DynamoDB, sized
+to cost a few cents an hour. `make aws-up` deploys it and `make aws-down` removes it. See
+[infra/README.md](infra/README.md).
 
 ## API
 

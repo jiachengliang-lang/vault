@@ -1,0 +1,137 @@
+name: deploy
+
+# After CI passes on main, ship the new version to AWS, check it through the public API, and roll
+# back to the last version that passed if it doesn't.
+#
+# Vault is torn down between work sessions to save money, so a push only deploys if it's already
+# up. "Run workflow" brings it up (deploy) or removes it (destroy) by hand.
+on:
+  workflow_run:
+    workflows: [ci]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      action:
+        type: choice
+        options: [deploy, destroy]
+        default: deploy
+
+permissions:
+  contents: write # to move the `deployed` tag
+
+# One deploy at a time. A newer push waits rather than cancelling a deploy half way.
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-east-2
+
+jobs:
+  deploy:
+    # workflow_run's branch filter only matches the branch *name*, so a pull request from a fork's
+    # "main" would pass it. Only deploy pushes made to this repository.
+    if: >-
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_repository.full_name == github.repository) ||
+      (github.event_name == 'workflow_dispatch' && inputs.action == 'deploy')
+    runs-on: ubuntu-24.04-arm # the host is ARM, so images build natively
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          fetch-depth: 0 # for the `deployed` tag
+
+      # An access key for the vault-github-deploy user (see infra/lib/ci-stack.ts for why it isn't
+      # keyless). scripts/github-deploy-key.sh creates and rotates it.
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Is Vault up?
+        id: up
+        run: |
+          if [ "${{ github.event_name }}" = workflow_dispatch ] || aws cloudformation describe-stacks --stack-name Vault >/dev/null 2>&1; then
+            echo "up=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::Vault isn't deployed right now, so there's nothing to update. Use Run workflow to bring it up."
+          fi
+
+      - uses: actions/setup-go@v5
+        if: steps.up.outputs.up
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        if: steps.up.outputs.up
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: infra/package-lock.json
+
+      - name: Deploy
+        id: deploy
+        if: steps.up.outputs.up
+        run: |
+          # The gateway stays reachable from your IP (ADMIN_CIDR) and from this runner, for the smoke test.
+          RUNNER=$(curl -s https://checkip.amazonaws.com)/32
+          echo "ALLOWED=${{ vars.ADMIN_CIDR }},$RUNNER" >> "$GITHUB_ENV"
+          cd infra && npm ci && npx cdk deploy Vault --require-approval never -c allowedCidrs="${{ vars.ADMIN_CIDR }},$RUNNER"
+
+      - name: Smoke test
+        id: smoke
+        if: steps.up.outputs.up
+        run: |
+          JWT_SECRET=$(aws secretsmanager get-secret-value --secret-id vault/app --query SecretString --output text | jq -r .JWT_SECRET)
+          echo "::add-mask::$JWT_SECRET"
+          export JWT_SECRET
+          GATEWAY=$(infra/scripts/gateway-url.sh) scripts/smoke.sh
+
+      - name: Mark this version as the last good one
+        if: steps.smoke.outcome == 'success'
+        run: |
+          git tag -f deployed
+          git push -f origin deployed
+
+      # A deploy that fails outright is already undone: CloudFormation rolls the stack back, and the
+      # ECS circuit breaker rolls back containers that keep crashing. This handles the other case,
+      # a deploy that goes through but doesn't work.
+      - name: Roll back to the last good version
+        if: failure() && steps.smoke.outcome == 'failure'
+        run: |
+          if ! git rev-parse -q --verify deployed >/dev/null; then
+            echo "::error::No earlier version passed the smoke test, so there's nothing to roll back to."
+            exit 1
+          fi
+          echo "::warning::Smoke test failed on ${GITHUB_SHA::7}; rolling back to $(git rev-parse --short deployed)"
+          git checkout --quiet deployed
+          cd infra && npm ci && npx cdk deploy Vault --require-approval never -c allowedCidrs="$ALLOWED"
+          cd ..
+          JWT_SECRET=$(aws secretsmanager get-secret-value --secret-id vault/app --query SecretString --output text | jq -r .JWT_SECRET)
+          echo "::add-mask::$JWT_SECRET"
+          export JWT_SECRET
+          GATEWAY=$(infra/scripts/gateway-url.sh) scripts/smoke.sh
+
+  destroy:
+    if: github.event_name == 'workflow_dispatch' && inputs.action == 'destroy'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      # An access key for the vault-github-deploy user (see infra/lib/ci-stack.ts for why it isn't
+      # keyless). scripts/github-deploy-key.sh creates and rotates it.
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: infra/package-lock.json
+      - run: cd infra && npm ci && npx cdk destroy Vault --force

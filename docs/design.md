@@ -40,11 +40,21 @@ match tokens back to people without the key (a plain hash of a user ID can be ma
 ## Personal data
 
 Each user gets their own data key, which encrypts their email and address with AES-256-GCM. The data keys are
-themselves encrypted with a master key, which would live in a KMS in production. Personal data is encrypted
-before it leaves the user service, so the database, Kafka and backups only ever hold ciphertext.
+themselves encrypted with a master key. On AWS that's a KMS key: it never leaves KMS, every unwrap is a request
+CloudTrail records, and only the user service's role may use it. (The services share one EC2 host, so the user
+service runs as its own ECS task to get its own role.) Locally the master key comes from an environment variable
+behind the same interface. Personal data is encrypted before it leaves the user service, so the database, Kafka
+and backups only ever hold ciphertext.
+
+The wrapped data keys are kept apart from the data. On AWS they're in DynamoDB, so a backup of the database
+contains no keys, and restoring an old one can't bring back the key of a user who's since been deleted.
+Point-in-time recovery is off for that table for the same reason: with it on, a deleted key could be restored
+for 35 days. Locally the keys are in a `user_keys` table, for convenience.
 
 Deleting an account destroys the user's data key. Copies of their encrypted data elsewhere (Kafka, backups,
-other services) become unreadable without having to find each one. Orders are kept, since financial records
+other services) become unreadable without having to find each one. The key is destroyed first, before the
+database transaction that removes the profile and writes the audit entry: it's the step that protects the user,
+and if the rest fails, a retry finishes it. Orders are kept, since financial records
 have retention rules, but they don't contain personal data.
 
 Each ciphertext is tied to its user and field, so encrypted data copied into another user's row, or from one
@@ -87,8 +97,9 @@ path, since a label per order ID would grow forever.
 - All services share one Postgres database locally. In production each would have its own.
 - An order that was charged but never marked paid stays PENDING until the client retries. A reconciliation job
   would fix this.
-- The encryption keys live in the same database as the data, so a backup contains both. Restoring an old backup
-  would bring back a deleted user's key. In production the keys would be stored separately.
+- Since keys moved out of the transaction, a profile update racing an account deletion can leave behind a row
+  encrypted under the destroyed key. It can't be read (reads treat a missing key as "not found"), and the next
+  update for that user replaces it.
 - The audit log goes through a single lock, which limits throughput. Someone with full write access to the table
   could also rewrite the whole chain. Saving the latest hash somewhere else would catch that.
 - The first requests into a full outage can still wait about 4 seconds (a timeout plus one retry) before the retry
