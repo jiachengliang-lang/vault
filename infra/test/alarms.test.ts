@@ -53,3 +53,12 @@ test('every log message an alarm matches on is still logged by the services', ()
     expect(source).toContain(`"${msg}"`);
   }
 });
+
+// ECS reports nothing (not 0) for a service with no tasks; without FILL the alarm took 11 minutes.
+test('service-down alarms treat a missing task count as 0', () => {
+  const down = alarms.filter((a) => /-down$/.test(a.Properties.AlarmName));
+  expect(down).toHaveLength(3);
+  for (const a of down) {
+    expect(a.Properties.Metrics.map((m: { Expression?: string }) => m.Expression)).toContain('FILL(tasks, 0)');
+  }
+});

@@ -144,6 +144,15 @@ export class VaultStack extends Stack {
         startPeriod: Duration.seconds(30),
       },
     });
+    // Kafka's data lives in a Docker volume on the host, so it survives the task restarting or being
+    // replaced by a deploy. In the container's own filesystem, a restart lost every record not yet
+    // consumed, and gave the topics new IDs that producers then had to rediscover. (Replacing the
+    // host still starts it empty; that's the cost of one host.)
+    kafkaTask.addVolume({
+      name: 'redpanda-data',
+      dockerVolumeConfiguration: { scope: ecs.Scope.SHARED, autoprovision: true, driver: 'local' },
+    });
+    redpanda.addMountPoints({ sourceVolume: 'redpanda-data', containerPath: '/var/lib/redpanda/data', readOnly: false });
     // Same as `make topics`. The relay stalls on a topic that doesn't exist, so create them up front.
     const topics = kafkaTask.addContainer('topics', {
       image: redpandaImage,
@@ -262,21 +271,29 @@ export class VaultStack extends Stack {
       alarm.addOkAction(new cw_actions.SnsAction(topic));
     };
 
-    // A service with no running task. ECS reports LiveTaskCount every minute while a service
-    // exists, so no data at all also counts as down. Three minutes, so the gap while a deploy
-    // swaps one task for the next doesn't page anyone.
+    // A service with no running task, for three minutes, so the gap while a deploy swaps one task
+    // for the next doesn't page anyone. ECS stops reporting LiveTaskCount at all once a service
+    // has no tasks, rather than reporting 0, and CloudWatch waits a long while before treating
+    // missing data as breaching: in a test it took 11 minutes. Filling the gaps with 0 makes it 3.
     const services: [string, ecs.Ec2Service][] = [['App', app.service], ['User', user.service], ['Kafka', kafka]];
     for (const [name, svc] of services) {
       notify(
         new cloudwatch.Alarm(this, `${name}Down`, {
           alarmName: `vault-${name.toLowerCase()}-down`,
           alarmDescription: `The ${name} service has had no running task for 3 minutes. ${runbook('service-down')}`,
-          metric: new cloudwatch.Metric({
-            namespace: 'AWS/ECS',
-            metricName: 'LiveTaskCount',
-            dimensionsMap: { ClusterName: cluster.clusterName, ServiceName: svc.serviceName },
-            statistic: 'Minimum',
+          metric: new cloudwatch.MathExpression({
+            expression: 'FILL(tasks, 0)',
+            usingMetrics: {
+              tasks: new cloudwatch.Metric({
+                namespace: 'AWS/ECS',
+                metricName: 'LiveTaskCount',
+                dimensionsMap: { ClusterName: cluster.clusterName, ServiceName: svc.serviceName },
+                statistic: 'Minimum',
+                period: Duration.minutes(1),
+              }),
+            },
             period: Duration.minutes(1),
+            label: `${name} running tasks`,
           }),
           comparisonOperator: cloudwatch.ComparisonOperator.LESS_THAN_THRESHOLD,
           threshold: 1,

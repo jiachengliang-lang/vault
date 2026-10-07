@@ -100,3 +100,50 @@ func TestRelayPublishesOutboxEvents(t *testing.T) {
 		}
 	}
 }
+
+// With Kafka unreachable, a batch must fail within PublishTimeout and leave its rows for the next
+// attempt. Before the timeout, ProduceSync retried forever: the relay hung silently and nothing
+// alerted, which an outage on AWS showed.
+func TestRelayFailsInsteadOfHangingWhenKafkaIsDown(t *testing.T) {
+	pool := platform.TestPool(t)
+	// Nothing listens on port 1, and the client never gets to a broker.
+	unreachable, err := kgo.NewClient(kgo.SeedBrokers("127.0.0.1:1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unreachable.Close()
+	relay := NewRelay(pool, unreachable)
+	relay.PublishTimeout = 500 * time.Millisecond
+	ctx := context.Background()
+
+	ev := testEvent{EventID: uuid.New(), UserID: uuid.New()}
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Write(ctx, tx, testTopic, ev.UserID.String(), ev); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		pool.Exec(context.Background(), `DELETE FROM outbox WHERE payload->>'event_id' = $1`, ev.EventID.String())
+	})
+
+	start := time.Now()
+	_, err = relay.PublishBatch(ctx)
+	if err == nil {
+		t.Fatal("publishing with Kafka down succeeded (or another relay holds the lock: stop local services)")
+	}
+	if took := time.Since(start); took > 3*time.Second {
+		t.Fatalf("took %v to give up, want about PublishTimeout", took)
+	}
+	var remaining int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM outbox WHERE payload->>'event_id' = $1`, ev.EventID.String()).Scan(&remaining); err != nil {
+		t.Fatal(err)
+	}
+	if remaining != 1 {
+		t.Fatal("the unpublished row should stay in the outbox for the next attempt")
+	}
+}
