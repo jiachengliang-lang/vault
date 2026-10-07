@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"log/slog"
 	"strconv"
 	"time"
 
@@ -42,17 +43,31 @@ func init() {
 // The route label is the route pattern ("/v1/orders/:id"), never the raw path. Raw paths would
 // create one time series per order ID, and unbounded label values like that are the classic way
 // to take down a Prometheus server (a "cardinality explosion").
-func Metrics() app.HandlerFunc {
+//
+// It also logs the requests worth alerting on: every 5xx, and every request slower than slow.
+// On AWS, where there's no Prometheus, CloudWatch alarms count these lines. Logging only the
+// exceptions keeps the log volume (and its cost) independent of traffic.
+func Metrics(slow time.Duration) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		start := time.Now()
 		c.Next(ctx)
+		elapsed := time.Since(start)
 		route := c.FullPath()
 		if route == "" {
 			route = "unmatched"
 		}
 		method := string(c.Method())
-		httpRequests.WithLabelValues(route, method, strconv.Itoa(c.Response.StatusCode())).Inc()
-		httpDuration.WithLabelValues(route, method).Observe(time.Since(start).Seconds())
+		status := c.Response.StatusCode()
+		httpRequests.WithLabelValues(route, method, strconv.Itoa(status)).Inc()
+		httpDuration.WithLabelValues(route, method).Observe(elapsed.Seconds())
+
+		attrs := []any{"route", route, "method", method, "status", status, "duration_ms", elapsed.Milliseconds()}
+		switch {
+		case status >= 500:
+			slog.ErrorContext(ctx, "request failed", attrs...)
+		case elapsed > slow:
+			slog.WarnContext(ctx, "slow request", attrs...)
+		}
 	}
 }
 

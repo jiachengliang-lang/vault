@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"time"
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/route"
@@ -35,8 +36,9 @@ func New(orders orderservice.Client, payments paymentservice.Client, users users
 }
 
 // Register mounts the API. Health checks stay outside auth so load balancers can reach them.
-func (g *Gateway) Register(r route.IRouter, secret []byte, limiter *RateLimiter) {
-	r.Use(Metrics(), RequestID())
+// Requests slower than slow are logged.
+func (g *Gateway) Register(r route.IRouter, secret []byte, limiter *RateLimiter, slow time.Duration) {
+	r.Use(Metrics(slow), RequestID())
 	r.GET("/healthz", func(ctx context.Context, c *app.RequestContext) { c.String(200, "ok") })
 
 	v1 := r.Group("/v1", Auth(secret), limiter.Middleware())
