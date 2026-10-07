@@ -45,10 +45,10 @@ aws-secrets: ## create the app keys in Secrets Manager (once)
 	infra/scripts/create-secrets.sh
 
 aws-up:    ## deploy to AWS; only your current IP can reach the gateway
-	cd infra && npx cdk deploy -c allowedCidr=$$(curl -s https://checkip.amazonaws.com)/32
+	cd infra && npx cdk deploy Vault -c allowedCidrs=$$(curl -s https://checkip.amazonaws.com)/32
 
 aws-down:  ## delete everything except the app keys (do this after every session)
-	cd infra && npx cdk destroy --force -c allowedCidr=0.0.0.0/32
+	cd infra && npx cdk destroy Vault --force
 
 aws-url:   ## print the gateway URL
 	infra/scripts/gateway-url.sh

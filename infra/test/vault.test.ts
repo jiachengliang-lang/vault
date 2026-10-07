@@ -7,7 +7,7 @@ import { VaultStack } from '../lib/vault-stack';
 const template = Template.fromStack(
   new VaultStack(new cdk.App(), 'Test', {
     env: { account: '111111111111', region: 'us-east-2' },
-    allowedCidr: '203.0.113.7/32',
+    allowedCidrs: ['203.0.113.7/32'],
     appSecretName: 'vault/app',
   }),
 );
@@ -26,7 +26,7 @@ test('database is small, single-AZ, encrypted and not public', () => {
   });
 });
 
-test('only the gateway port is open, and only to allowedCidr', () => {
+test('only the gateway port is open, and only to allowedCidrs', () => {
   const ingress = Object.values(template.findResources('AWS::EC2::SecurityGroup'))
     .flatMap((sg) => sg.Properties.SecurityGroupIngress ?? []);
   expect(ingress).toEqual([

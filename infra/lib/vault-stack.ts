@@ -13,8 +13,8 @@ import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import { Construct } from 'constructs';
 
 export interface VaultStackProps extends StackProps {
-  /** Who can reach the gateway, e.g. "203.0.113.7/32". */
-  readonly allowedCidr: string;
+  /** Who can reach the gateway, e.g. ["203.0.113.7/32"]. */
+  readonly allowedCidrs: string[];
   /** Secrets Manager secret holding the app keys (see scripts/create-secrets.sh). */
   readonly appSecretName: string;
 }
@@ -40,10 +40,12 @@ export class VaultStack extends Stack {
       ],
     });
 
-    // Only the gateway's port is reachable, and only from allowedCidr. No SSH: shell access goes
+    // Only the gateway's port is reachable, and only from allowedCidrs. No SSH: shell access goes
     // through Session Manager, which needs no open port.
     const hostSg = new ec2.SecurityGroup(this, 'HostSg', { vpc, description: 'ECS host' });
-    hostSg.addIngressRule(ec2.Peer.ipv4(props.allowedCidr), ec2.Port.tcp(8080), 'Vault gateway');
+    for (const cidr of props.allowedCidrs) {
+      hostSg.addIngressRule(ec2.Peer.ipv4(cidr), ec2.Port.tcp(8080), 'Vault gateway');
+    }
     const hostRole = new iam.Role(this, 'HostRole', {
       assumedBy: new iam.ServicePrincipal('ec2.amazonaws.com'),
       managedPolicies: [iam.ManagedPolicy.fromAwsManagedPolicyName('AmazonSSMManagedInstanceCore')],
