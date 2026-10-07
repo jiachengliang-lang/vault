@@ -1,6 +1,6 @@
-.PHONY: up down logs psql topics build run test e2e lint load bench chaos
+.PHONY: up down logs psql topics build run test e2e lint load bench chaos aws-secrets aws-up aws-down aws-url
 
-up:        ## start infra (postgres, redpanda, jaeger, prometheus, grafana)
+up:        ## start infra (postgres, redpanda, dynamodb local, jaeger, prometheus, grafana)
 	docker compose up -d
 
 down:      ## stop infra and wipe volumes
@@ -40,3 +40,15 @@ bench: build ## latency at increasing fixed rates (run `make run` in another ter
 
 chaos: build ## break Postgres, Kafka and payment under load, then check consistency (needs `make run`)
 	./scripts/chaos.sh
+
+aws-secrets: ## create the app keys in Secrets Manager (once)
+	infra/scripts/create-secrets.sh
+
+aws-up:    ## deploy to AWS; only your current IP can reach the gateway
+	cd infra && npx cdk deploy -c allowedCidr=$$(curl -s https://checkip.amazonaws.com)/32
+
+aws-down:  ## delete everything except the app keys (do this after every session)
+	cd infra && npx cdk destroy --force -c allowedCidr=0.0.0.0/32
+
+aws-url:   ## print the gateway URL
+	infra/scripts/gateway-url.sh

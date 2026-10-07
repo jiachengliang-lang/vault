@@ -1,0 +1,10 @@
+.git
+.github
+bin
+logs
+docs
+infra
+loadtest
+*.prof
+.env
+.DS_Store

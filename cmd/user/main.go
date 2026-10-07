@@ -8,6 +8,8 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -15,6 +17,10 @@ import (
 	"sync"
 	"time"
 
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	"github.com/aws/aws-sdk-go-v2/service/kms"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/twmb/franz-go/pkg/kgo"
 
 	"vault/internal/outbox"
@@ -28,19 +34,7 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// MASTER_KEY: base64 of 32 random bytes (openssl rand -base64 32). In production this is a KMS key.
-	masterKey := sha256.Sum256([]byte("dev-master-key-change-me"))
-	key := masterKey[:]
-	if v, ok := os.LookupEnv("MASTER_KEY"); ok {
-		var err error
-		if key, err = base64.StdEncoding.DecodeString(v); err != nil {
-			log.Error("MASTER_KEY must be base64", "err", err)
-			os.Exit(1)
-		}
-	} else {
-		log.Warn("MASTER_KEY not set, using the dev default")
-	}
-	keys, err := user.NewLocalKeyWrapper(key)
+	keys, err := keyWrapper(ctx)
 	if err != nil {
 		log.Error("master key", "err", err)
 		os.Exit(1)
@@ -61,7 +55,12 @@ func main() {
 	}
 	defer pool.Close()
 	platform.RegisterPoolMetrics(pool)
-	store := user.NewStore(pool, keys, index)
+	keyStore, err := keyStore(ctx, pool)
+	if err != nil {
+		log.Error("key store", "err", err)
+		os.Exit(1)
+	}
+	store := user.NewStore(pool, keys, keyStore, index)
 
 	admin, err := platform.StartAdmin(platform.Env("ADMIN_ADDR", ":8083"), pool.Ping, platform.Route{
 		Pattern: "GET /audit/verify",
@@ -134,4 +133,40 @@ func main() {
 	}
 	cancel()
 	wg.Wait()
+}
+
+// keyWrapper uses the KMS key in KMS_KEY_ID if set (on AWS). Otherwise it uses MASTER_KEY, base64 of
+// 32 random bytes (openssl rand -base64 32), or a dev default.
+func keyWrapper(ctx context.Context) (user.KeyWrapper, error) {
+	if id, ok := os.LookupEnv("KMS_KEY_ID"); ok {
+		cfg, err := awsconfig.LoadDefaultConfig(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return user.NewKMSKeyWrapper(kms.NewFromConfig(cfg), id), nil
+	}
+	masterKey := sha256.Sum256([]byte("dev-master-key-change-me"))
+	key := masterKey[:]
+	if v, ok := os.LookupEnv("MASTER_KEY"); ok {
+		var err error
+		if key, err = base64.StdEncoding.DecodeString(v); err != nil {
+			return nil, fmt.Errorf("MASTER_KEY must be base64: %w", err)
+		}
+	} else {
+		slog.Warn("MASTER_KEY not set, using the dev default")
+	}
+	return user.NewLocalKeyWrapper(key)
+}
+
+// keyStore keeps data keys in the DynamoDB table KEYS_TABLE if set (on AWS), otherwise in Postgres.
+func keyStore(ctx context.Context, pool *pgxpool.Pool) (user.KeyStore, error) {
+	table, ok := os.LookupEnv("KEYS_TABLE")
+	if !ok {
+		return user.NewPostgresKeyStore(pool), nil
+	}
+	cfg, err := awsconfig.LoadDefaultConfig(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return user.NewDynamoKeyStore(dynamodb.NewFromConfig(cfg), table), nil
 }
