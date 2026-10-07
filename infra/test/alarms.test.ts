@@ -19,10 +19,17 @@ test('stays within the 10 alarms CloudWatch gives for free', () => {
   expect(alarms.length).toBeLessThanOrEqual(10);
 });
 
-test('every alarm emails on the way in and on recovery', () => {
+test('every alarm emails on the way into ALARM', () => {
   for (const a of alarms) {
     expect(JSON.stringify(a.Properties.AlarmActions)).toContain(':vault-alarms');
-    expect(JSON.stringify(a.Properties.OKActions)).toContain(':vault-alarms');
+  }
+});
+
+// Recovery emails come from AlertsStack's rule instead (see alerts.test.ts), which skips an
+// alarm's first move to OK after a fresh deploy.
+test('no OK actions on the alarms themselves', () => {
+  for (const a of alarms) {
+    expect(a.Properties.OKActions ?? []).toEqual([]);
   }
 });
 

@@ -3,8 +3,9 @@
 What to do when a Vault alarm emails you. Each alarm's description links to its section here. Commands assume the
 AWS CLI is signed in to the account, from the repo root.
 
-Alarms email on the way into ALARM and again on recovery to OK. Right after a fresh deploy you'll also get one `OK`
-email per alarm, as each gets its first data: CloudWatch notifies on every move to OK, including the first.
+Alarms email on the way into ALARM, and a `RECOVERED` email follows when one goes from ALARM back to OK. (Recovery
+emails come from an EventBridge rule in the `VaultAlerts` stack rather than the alarms' own OK actions, which would
+also fire as each new alarm gets its first data after a fresh deploy.)
 
 ## Any alarm: first look
 

@@ -259,7 +259,7 @@ export class VaultStack extends Stack {
     // ---------- alarms ----------
     // Each one is a symptom someone would notice, and each has a section in docs/runbook.md saying
     // what it means and what to do. They email whoever subscribed to the vault-alarms topic
-    // (AlertsStack), on the way into ALARM and again on recovery.
+    // (AlertsStack) on the way into ALARM; AlertsStack sends the recovery emails.
     const topic = sns.Topic.fromTopicArn(
       this,
       'AlarmTopic',
@@ -268,7 +268,6 @@ export class VaultStack extends Stack {
     const runbook = (anchor: string) => `${RUNBOOK_URL}#${anchor}`;
     const notify = (alarm: cloudwatch.Alarm) => {
       alarm.addAlarmAction(new cw_actions.SnsAction(topic));
-      alarm.addOkAction(new cw_actions.SnsAction(topic));
     };
 
     // A service with no running task, for three minutes, so the gap while a deploy swaps one task
