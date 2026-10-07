@@ -35,5 +35,18 @@ scripts/github-deploy-key.sh       # creates the key and stores it in GitHub; ru
 gh variable set ADMIN_CIDR --body "$(curl -s https://checkip.amazonaws.com)/32"   # optional: your IP
 ```
 
+## Alarms
+
+Eight CloudWatch alarms (inside the free 10) email the `vault-alarms` topic, from the `VaultAlerts` stack. That
+stack stays up so the email subscription only needs confirming once:
+
+```bash
+npx cdk deploy VaultAlerts -c alarmEmail=you@example.com   # then click the link AWS emails you
+```
+
+Three watch for a service with no running task. Four count log lines the services write when something's wrong
+(5xx responses, slow checkouts, Kafka publish failures, a broken audit chain), and one watches database disk.
+[docs/runbook.md](../docs/runbook.md) says what each means and what to do.
+
 `npm test` checks the choices that keep it cheap and closed: no NAT gateway or load balancer, a small private
 encrypted database, and only the gateway port open.

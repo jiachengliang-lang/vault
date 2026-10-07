@@ -158,7 +158,7 @@ func newHarness(t *testing.T, limiter *RateLimiter) *harness {
 		users:    &fakeUsers{profiles: map[string]*userapi.Profile{}},
 	}
 	h.engine = route.NewEngine(config.NewOptions(nil))
-	New(h.orders, h.payments, h.users).Register(h.engine, secret, limiter)
+	New(h.orders, h.payments, h.users).Register(h.engine, secret, limiter, time.Second)
 	return h
 }
 

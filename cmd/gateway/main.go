@@ -58,6 +58,8 @@ func main() {
 	burst, _ := strconv.Atoi(platform.Env("RATE_LIMIT_BURST", "40"))
 	limiter := gateway.NewRateLimiter(rps, burst)
 	go limiter.RunEvictor(ctx)
+	// Requests slower than this are logged. 500 ms matches the CheckoutSlow alert.
+	slowMS, _ := strconv.Atoi(platform.Env("SLOW_REQUEST_MS", "500"))
 
 	admin, err := platform.StartAdmin(platform.Env("ADMIN_ADDR", ":8090"), func(context.Context) error { return nil })
 	if err != nil {
@@ -75,6 +77,6 @@ func main() {
 		tracer,
 	)
 	h.Use(hertztracing.ServerMiddleware(tracingCfg))
-	gateway.New(orders, payments, users).Register(h, secret, limiter)
+	gateway.New(orders, payments, users).Register(h, secret, limiter, time.Duration(slowMS)*time.Millisecond)
 	h.Spin()
 }

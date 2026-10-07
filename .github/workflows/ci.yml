@@ -39,3 +39,22 @@ jobs:
       - name: Service logs
         if: failure()
         run: tail -n 50 logs/*.log
+
+  # The CDK stack tests: they pin the choices that keep the AWS setup cheap and closed, check every
+  # alarm has a runbook section, and check the log messages alarms match on still exist in the code.
+  infra:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: infra
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: infra/package-lock.json
+      - run: npm ci
+      - run: npx tsc --noEmit
+      - run: npm test

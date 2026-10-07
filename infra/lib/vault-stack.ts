@@ -1,6 +1,8 @@
 import * as path from 'node:path';
 import { CfnOutput, Duration, RemovalPolicy, Stack, StackProps } from 'aws-cdk-lib/core';
 import * as autoscaling from 'aws-cdk-lib/aws-autoscaling';
+import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
+import * as cw_actions from 'aws-cdk-lib/aws-cloudwatch-actions';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import { Platform } from 'aws-cdk-lib/aws-ecr-assets';
@@ -10,7 +12,11 @@ import * as kms from 'aws-cdk-lib/aws-kms';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as rds from 'aws-cdk-lib/aws-rds';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
+import * as sns from 'aws-cdk-lib/aws-sns';
 import { Construct } from 'constructs';
+import { ALARM_TOPIC_NAME } from './alerts-stack';
+
+const RUNBOOK_URL = 'https://github.com/jiachengliang-lang/vault/blob/main/docs/runbook.md';
 
 export interface VaultStackProps extends StackProps {
   /** Who can reach the gateway, e.g. ["203.0.113.7/32"]. */
@@ -220,10 +226,10 @@ export class VaultStack extends Stack {
       }
       const svc = new ecs.Ec2Service(this, id, { ...serviceDefaults, taskDefinition: task });
       svc.node.addDependency(host, cluster);
-      return task;
+      return { task, service: svc };
     };
 
-    newTask('App', [
+    const app = newTask('App', [
       { name: 'gateway', secrets: { JWT_SECRET: appKey('JWT_SECRET') } },
       { name: 'order', secrets: dbSecrets },
       { name: 'payment', secrets: dbSecrets },
@@ -231,15 +237,128 @@ export class VaultStack extends Stack {
     ]);
     // Only the user service can use the master key and the key table: a bug or breach in the
     // gateway, order or payment service can't decrypt anyone's personal data.
-    const userTask = newTask('User', [
+    const user = newTask('User', [
       {
         name: 'user',
         env: { KMS_KEY_ID: masterKey.keyArn, KEYS_TABLE: keysTable.tableName, AWS_REGION: this.region },
         secrets: { ...dbSecrets, BLIND_INDEX_KEY: appKey('BLIND_INDEX_KEY') },
       },
     ]);
-    masterKey.grantEncryptDecrypt(userTask.taskRole);
-    keysTable.grantReadWriteData(userTask.taskRole);
+    masterKey.grantEncryptDecrypt(user.task.taskRole);
+    keysTable.grantReadWriteData(user.task.taskRole);
+
+    // ---------- alarms ----------
+    // Each one is a symptom someone would notice, and each has a section in docs/runbook.md saying
+    // what it means and what to do. They email whoever subscribed to the vault-alarms topic
+    // (AlertsStack), on the way into ALARM and again on recovery.
+    const topic = sns.Topic.fromTopicArn(
+      this,
+      'AlarmTopic',
+      `arn:aws:sns:${this.region}:${this.account}:${ALARM_TOPIC_NAME}`,
+    );
+    const runbook = (anchor: string) => `${RUNBOOK_URL}#${anchor}`;
+    const notify = (alarm: cloudwatch.Alarm) => {
+      alarm.addAlarmAction(new cw_actions.SnsAction(topic));
+      alarm.addOkAction(new cw_actions.SnsAction(topic));
+    };
+
+    // A service with no running task. ECS reports LiveTaskCount every minute while a service
+    // exists, so no data at all also counts as down. Three minutes, so the gap while a deploy
+    // swaps one task for the next doesn't page anyone.
+    const services: [string, ecs.Ec2Service][] = [['App', app.service], ['User', user.service], ['Kafka', kafka]];
+    for (const [name, svc] of services) {
+      notify(
+        new cloudwatch.Alarm(this, `${name}Down`, {
+          alarmName: `vault-${name.toLowerCase()}-down`,
+          alarmDescription: `The ${name} service has had no running task for 3 minutes. ${runbook('service-down')}`,
+          metric: new cloudwatch.Metric({
+            namespace: 'AWS/ECS',
+            metricName: 'LiveTaskCount',
+            dimensionsMap: { ClusterName: cluster.clusterName, ServiceName: svc.serviceName },
+            statistic: 'Minimum',
+            period: Duration.minutes(1),
+          }),
+          comparisonOperator: cloudwatch.ComparisonOperator.LESS_THAN_THRESHOLD,
+          threshold: 1,
+          evaluationPeriods: 3,
+          treatMissingData: cloudwatch.TreatMissingData.BREACHING,
+        }),
+      );
+    }
+
+    // The services write JSON logs. Metric filters turn the lines worth alerting on into counts.
+    const logCount = (id: string, pattern: string) =>
+      new logs.MetricFilter(this, `${id}Filter`, {
+        logGroup,
+        filterPattern: logs.FilterPattern.literal(pattern),
+        metricNamespace: 'Vault',
+        metricName: id,
+        metricValue: '1',
+      }).metric({ statistic: 'Sum', period: Duration.minutes(1) });
+
+    // An alarm fires when the count is above threshold, over a window of `minutes`.
+    const logAlarms: { id: string; pattern: string; threshold: number; minutes: number; description: string; anchor: string }[] = [
+      {
+        id: 'GatewayErrors',
+        pattern: '{ $.msg = "request failed" }',
+        threshold: 10,
+        minutes: 5,
+        description: 'More than 10 requests failed with a 5xx in 5 minutes.',
+        anchor: 'gateway-errors',
+      },
+      {
+        id: 'SlowCheckouts',
+        pattern: '{ $.msg = "slow request" && $.route = "/v1/checkout" }',
+        threshold: 10,
+        minutes: 5,
+        description: 'More than 10 checkouts took over 500 ms in 5 minutes.',
+        anchor: 'slow-checkouts',
+      },
+      {
+        id: 'OutboxStuck',
+        pattern: '{ $.msg = "outbox relay: publish failed, will retry" }',
+        threshold: 0,
+        minutes: 3,
+        description: 'Events have failed to reach Kafka for 3 minutes in a row; they are waiting in the outbox.',
+        anchor: 'outbox-stuck',
+      },
+      {
+        id: 'AuditChainBroken',
+        pattern: '{ $.msg = "AUDIT CHAIN BROKEN" }',
+        threshold: 0,
+        minutes: 1,
+        description: 'The audit log failed verification: an entry was edited, deleted or reordered.',
+        anchor: 'audit-chain-broken',
+      },
+    ];
+    for (const a of logAlarms) {
+      const count = logCount(a.id, a.pattern);
+      notify(
+        new cloudwatch.Alarm(this, a.id, {
+          alarmName: `vault-${a.anchor}`,
+          alarmDescription: `${a.description} ${runbook(a.anchor)}`,
+          // OutboxStuck must hold every minute (Kafka still down); the others sum a window.
+          ...(a.id === 'OutboxStuck'
+            ? { metric: count, evaluationPeriods: a.minutes, datapointsToAlarm: a.minutes }
+            : { metric: count.with({ period: Duration.minutes(a.minutes) }), evaluationPeriods: 1 }),
+          comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+          threshold: a.threshold,
+          // No matching lines means nothing went wrong.
+          treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+        }),
+      );
+    }
+
+    notify(
+      new cloudwatch.Alarm(this, 'DbStorageLow', {
+        alarmName: 'vault-db-storage-low',
+        alarmDescription: `The database has less than 2 GiB of disk left. ${runbook('db-storage-low')}`,
+        metric: db.metricFreeStorageSpace({ statistic: 'Minimum', period: Duration.minutes(5) }),
+        comparisonOperator: cloudwatch.ComparisonOperator.LESS_THAN_THRESHOLD,
+        threshold: 2 * 1024 ** 3,
+        evaluationPeriods: 1,
+      }),
+    );
 
     new CfnOutput(this, 'HostGroup', {
       value: host.autoScalingGroupName,

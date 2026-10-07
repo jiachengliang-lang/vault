@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import * as cdk from 'aws-cdk-lib/core';
+import { AlertsStack } from '../lib/alerts-stack';
 import { CiStack } from '../lib/ci-stack';
 import { VaultStack } from '../lib/vault-stack';
 
@@ -18,3 +19,7 @@ new VaultStack(app, 'Vault', { env, allowedCidrs, appSecretName: 'vault/app' });
 
 // Deployed once, and left in place: it's only an IAM user, which costs nothing.
 new CiStack(app, 'VaultCi', { env });
+
+// Also left in place: the topic alarms email through. Deploy with -c alarmEmail=you@example.com
+// and click the link AWS sends.
+new AlertsStack(app, 'VaultAlerts', { env, email: app.node.tryGetContext('alarmEmail') });

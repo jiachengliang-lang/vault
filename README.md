@@ -114,6 +114,7 @@ Most of these only showed up under load or during the chaos test:
 
 - [docs/design.md](docs/design.md): why things are built the way they are, and known limitations
 - [docs/benchmarks.md](docs/benchmarks.md): how performance was measured
+- [docs/runbook.md](docs/runbook.md): what each AWS alarm means and what to do about it
 
 ## What's next
 
