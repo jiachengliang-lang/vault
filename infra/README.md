@@ -44,6 +44,10 @@ stack stays up so the email subscription only needs confirming once:
 npx cdk deploy VaultAlerts -c alarmEmail=you@example.com   # then click the link AWS emails you
 ```
 
+Pass `alarmEmail` every time you deploy that stack: without it, the subscription is removed. Alarms email on the
+way into ALARM; a rule in the same stack emails when one recovers (ALARM to OK only, so a fresh deploy doesn't send
+an "OK" per alarm).
+
 Three watch for a service with no running task. Four count log lines the services write when something's wrong
 (5xx responses, slow checkouts, Kafka publish failures, a broken audit chain), and one watches database disk.
 [docs/runbook.md](../docs/runbook.md) says what each means and what to do.
