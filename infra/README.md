@@ -35,6 +35,14 @@ scripts/github-deploy-key.sh       # creates the key and stores it in GitHub; ru
 gh variable set ADMIN_CIDR --body "$(curl -s https://checkip.amazonaws.com)/32"   # optional: your IP
 ```
 
+## Load testing
+
+`.github/workflows/loadtest.yml` (Run workflow) runs `loadtest/aws-bench.sh` from a GitHub runner against Vault
+while it's up: fixed-rate checkouts at each rate you give, with latency, errors, and the peak CPU of the host and the
+database from CloudWatch, so the table shows which gives out first. The runner's IP is let through the security
+group for the length of the test and removed afterwards. It shares the deploy workflow's concurrency group, so a
+deploy can't swap containers out mid-test.
+
 ## Alarms
 
 Eight CloudWatch alarms (inside the free 10) email the `vault-alarms` topic, from the `VaultAlerts` stack. That

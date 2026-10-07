@@ -23,8 +23,8 @@ export class CiStack extends Stack {
         resources: [`arn:aws:iam::${this.account}:role/cdk-hnb659fds-*`],
       }),
     );
-    // What the workflow does around the deploy: check whether Vault is up, find the gateway's
-    // address, and mint test tokens for the smoke test.
+    // What the workflows do around a deploy: check whether Vault is up, find the gateway's
+    // address, and mint test tokens for the smoke and load tests.
     user.addToPolicy(
       new iam.PolicyStatement({
         actions: ['cloudformation:DescribeStacks'],
@@ -32,6 +32,16 @@ export class CiStack extends Stack {
       }),
     );
     user.addToPolicy(new iam.PolicyStatement({ actions: ['ec2:DescribeInstances'], resources: ['*'] }));
+    // The load test workflow: let the runner's address reach the gateway for the length of the
+    // test (only on Vault's own security groups), and read CPU metrics to find the bottleneck.
+    user.addToPolicy(
+      new iam.PolicyStatement({
+        actions: ['ec2:AuthorizeSecurityGroupIngress', 'ec2:RevokeSecurityGroupIngress'],
+        resources: [`arn:aws:ec2:${this.region}:${this.account}:security-group/*`],
+        conditions: { StringEquals: { 'aws:ResourceTag/aws:cloudformation:stack-name': 'Vault' } },
+      }),
+    );
+    user.addToPolicy(new iam.PolicyStatement({ actions: ['cloudwatch:GetMetricStatistics'], resources: ['*'] }));
     user.addToPolicy(
       new iam.PolicyStatement({
         actions: ['secretsmanager:GetSecretValue'],
