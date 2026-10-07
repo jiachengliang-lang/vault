@@ -3,6 +3,9 @@
 What to do when a Vault alarm emails you. Each alarm's description links to its section here. Commands assume the
 AWS CLI is signed in to the account, from the repo root.
 
+Alarms email on the way into ALARM and again on recovery to OK. Right after a fresh deploy you'll also get one `OK`
+email per alarm, as each gets its first data: CloudWatch notifies on every move to OK, including the first.
+
 ## Any alarm: first look
 
 ```bash
@@ -74,7 +77,13 @@ CPU credits, it recovers as credits build back up, or move to a larger instance 
 ## Outbox stuck
 
 **Means:** the order service's outbox relay has failed to publish to Kafka every minute for 3 minutes. Checkout
-still works: events wait in the `outbox` table and go out once Kafka is back, in order. Analytics falls behind.
+still works: events wait in the `outbox` table and go out once Kafka is back, in order. Analytics falls behind, and
+the pipeline logs a `fetch error` every few seconds while it can't reach Kafka.
+
+Each publish attempt gives up after 10 seconds and logs a warning, which is what this alarm counts. (Before that
+limit, the relay waited on Kafka forever and logged nothing, so an outage on AWS went unalerted.) It only fires
+while there are events waiting: with no checkouts, there's nothing to fail, and only
+[Service down](#service-down) for Kafka tells you.
 
 **Check:** is Kafka up ([Service down](#service-down) for the Kafka service)? The relay's warnings say why
 publishing failed:
@@ -82,7 +91,9 @@ publishing failed:
 aws logs tail "$LG" --since 15m --filter-pattern '{ $.msg = "outbox relay: publish failed, will retry" }'
 ```
 `UNKNOWN_TOPIC_OR_PARTITION` means a topic is missing: the Kafka task's `topics` container creates them at start
-and its log says what happened.
+and its log says what happened. Kafka's data is in a Docker volume on the host, so it survives the task
+restarting. A replaced host starts Kafka empty: a single `UNKNOWN_TOPIC_ID` warning right after is producers
+noticing the recreated topics, and the retry succeeds.
 
 **Fix:** bring Kafka back. Nothing to replay by hand; the relay catches up by itself. Watch the warnings stop.
 

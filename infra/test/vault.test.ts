@@ -103,3 +103,14 @@ test('key table has no point-in-time recovery, so deleted keys stay deleted', ()
     Replicas: [Match.objectLike({ PointInTimeRecoverySpecification: { PointInTimeRecoveryEnabled: false } })],
   });
 });
+
+test("Kafka's data survives the task restarting", () => {
+  const [kafkaTask] = Object.values(template.findResources('AWS::ECS::TaskDefinition')).filter((t) =>
+    t.Properties.ContainerDefinitions.some((c: { Name: string }) => c.Name === 'redpanda'),
+  );
+  expect(kafkaTask.Properties.Volumes).toEqual([
+    expect.objectContaining({ DockerVolumeConfiguration: expect.objectContaining({ Scope: 'shared', Autoprovision: true }) }),
+  ]);
+  const redpanda = kafkaTask.Properties.ContainerDefinitions.find((c: { Name: string }) => c.Name === 'redpanda');
+  expect(redpanda.MountPoints).toEqual([expect.objectContaining({ ContainerPath: '/var/lib/redpanda/data' })]);
+});

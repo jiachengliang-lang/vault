@@ -24,6 +24,11 @@ The order service never writes to Postgres and Kafka separately, because one cou
 writes the event to an outbox table in the same transaction as the order, and a relay publishes outbox rows to
 Kafka afterwards. If Kafka is down, checkout still works and events wait in the table.
 
+Each publish attempt has a 10-second limit. Without one, the Kafka client retries forever while Kafka is down,
+so the relay hung silently with its transaction open: nothing logged a failure and the backlog metrics froze. A
+Kafka outage test on AWS found that. Now each attempt fails, is logged, and the next one retries. A batch that timed
+out may have been partly delivered; sending it again is safe, since consumers ignore event IDs they've seen.
+
 Only one relay publishes at a time (a Postgres advisory lock), which keeps each user's events in order. Events are
 keyed by user ID, so a user's events land in the same partition. Published rows are deleted rather than marked as
 published, since an update rewrites the whole row and write volume turned out to be the bottleneck.

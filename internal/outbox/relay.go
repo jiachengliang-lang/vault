@@ -75,10 +75,15 @@ type Relay struct {
 	kafka     *kgo.Client
 	BatchSize int
 	Interval  time.Duration
+	// PublishTimeout bounds one batch's wait for Kafka. Without it, ProduceSync retries forever
+	// while Kafka is down: the relay hangs silently, holding its transaction open, so nothing
+	// logs a failure and the backlog metrics stop updating. With it, each attempt fails, the
+	// failure is logged (the OutboxStuck alarm counts those lines), and the next attempt retries.
+	PublishTimeout time.Duration
 }
 
 func NewRelay(db *pgxpool.Pool, kafka *kgo.Client) *Relay {
-	return &Relay{db: db, kafka: kafka, BatchSize: 500, Interval: 200 * time.Millisecond}
+	return &Relay{db: db, kafka: kafka, BatchSize: 500, Interval: 200 * time.Millisecond, PublishTimeout: 10 * time.Second}
 }
 
 // Run publishes until ctx is cancelled. A full batch means there's a backlog, so it
@@ -154,7 +159,11 @@ func (r *Relay) PublishBatch(ctx context.Context) (int, error) {
 
 	// ProduceSync waits for broker acks. The producer is idempotent by default, so records
 	// sharing a key (user_id) keep their order within the partition, even across retries.
-	if err := r.kafka.ProduceSync(ctx, records...).FirstErr(); err != nil {
+	// A batch that times out may have been partly delivered; the retry sends it again, and
+	// consumers already ignore event IDs they've seen.
+	produceCtx, cancel := context.WithTimeout(ctx, r.PublishTimeout)
+	defer cancel()
+	if err := r.kafka.ProduceSync(produceCtx, records...).FirstErr(); err != nil {
 		return 0, fmt.Errorf("produce: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `DELETE FROM outbox WHERE id = ANY($1)`, ids); err != nil {
