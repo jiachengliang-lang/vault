@@ -234,7 +234,7 @@ export class VaultStack extends Stack {
     const userTask = newTask('User', [
       {
         name: 'user',
-        env: { KMS_KEY_ID: masterKey.keyArn, KEYS_TABLE: keysTable.tableName, AWS_REGION: 'us-east-1' },
+        env: { KMS_KEY_ID: masterKey.keyArn, KEYS_TABLE: keysTable.tableName, AWS_REGION: this.region },
         secrets: { ...dbSecrets, BLIND_INDEX_KEY: appKey('BLIND_INDEX_KEY') },
       },
     ]);
