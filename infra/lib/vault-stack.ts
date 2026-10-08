@@ -207,8 +207,8 @@ export class VaultStack extends Stack {
       // pgx sizes its pool from the CPU count, max(4, cores): 10 on a laptop, but 4 on this
       // 2-vCPU host. A load test on AWS failed at 400 checkouts/s with the host at 25% CPU and the
       // database at 35%: the order service's requests were queueing for one of its 4 connections
-      // until the 2 s RPC timeout. Four services at 16 each stay well under the ~100 connections
-      // a db.t4g.micro allows.
+      // until the 2 s RPC timeout. Four services at 16 each is 64, under the 79 connections a
+      // db.t4g.micro allows (max_connections, checked with scripts/aws-sql.sh).
       DATABASE_URL: 'postgres:///vault?sslmode=require&pool_max_conns=16',
       KAFKA_BROKERS: 'localhost:9092',
       // No trace collector yet; sampling nothing keeps the exporter quiet.
