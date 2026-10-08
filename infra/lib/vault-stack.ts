@@ -261,6 +261,20 @@ export class VaultStack extends Stack {
     masterKey.grantEncryptDecrypt(user.task.taskRole);
     keysTable.grantReadWriteData(user.task.taskRole);
 
+    // ---------- one-off SQL ----------
+    // The database is only reachable from inside the VPC. scripts/aws-sql.sh runs psql against it
+    // as a one-off task on the host, using this definition, and prints what it returns. The chaos
+    // test uses it to count charges; the runbook to look around.
+    const sqlTask = new ecs.Ec2TaskDefinition(this, 'SqlTask', { networkMode: ecs.NetworkMode.HOST });
+    sqlTask.addContainer('sql', {
+      image: migrateImage,
+      entryPoint: ['psql', '-v', 'ON_ERROR_STOP=1', '-qAt', '-F', '|'],
+      environment: dbEnv,
+      secrets: dbSecrets,
+      memoryReservationMiB: 64,
+      logging: logging('sql'),
+    });
+
     // ---------- alarms ----------
     // Each one is a symptom someone would notice, and each has a section in docs/runbook.md saying
     // what it means and what to do. They email whoever subscribed to the vault-alarms topic
@@ -396,5 +410,7 @@ export class VaultStack extends Stack {
     new CfnOutput(this, 'ClusterName', { value: cluster.clusterName });
     new CfnOutput(this, 'DbInstance', { value: db.instanceIdentifier });
     new CfnOutput(this, 'HostSecurityGroup', { value: hostSg.securityGroupId });
+    new CfnOutput(this, 'SqlTaskDefinition', { value: sqlTask.taskDefinitionArn });
+    new CfnOutput(this, 'CapacityProvider', { value: capacity.capacityProviderName });
   }
 }
