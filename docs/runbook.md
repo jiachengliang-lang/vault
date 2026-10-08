@@ -19,6 +19,9 @@ aws ecs describe-services --cluster "$CLUSTER" --services $(aws ecs list-service
   --query 'services[].[serviceName,runningCount,desiredCount,events[0].message]' --output table
 ```
 
+To look inside the database (it only accepts connections from inside the VPC), `scripts/aws-sql.sh "<SQL>"` runs
+psql as a one-off task and prints the rows.
+
 Was there a deploy just before it started? Check the deploy workflow's runs on GitHub. If the smoke test passed but
 things broke anyway, run the deploy workflow on the `deployed` tag's commit to go back, then investigate.
 
