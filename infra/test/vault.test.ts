@@ -114,3 +114,15 @@ test("Kafka's data survives the task restarting", () => {
   const redpanda = kafkaTask.Properties.ContainerDefinitions.find((c: { Name: string }) => c.Name === 'redpanda');
   expect(redpanda.MountPoints).toEqual([expect.objectContaining({ ContainerPath: '/var/lib/redpanda/data' })]);
 });
+
+// pgx's default pool is max(4, cores), so 4 on the 2-vCPU host; that capped checkout throughput.
+test('every service sets its own Postgres pool size', () => {
+  const containers = Object.values(template.findResources('AWS::ECS::TaskDefinition')).flatMap(
+    (t) => t.Properties.ContainerDefinitions,
+  );
+  const urls = containers.flatMap((c: { Environment?: { Name: string; Value: string }[] }) =>
+    (c.Environment ?? []).filter((e) => e.Name === 'DATABASE_URL').map((e) => e.Value),
+  );
+  expect(urls.length).toBeGreaterThan(0);
+  for (const u of urls) expect(u).toMatch(/pool_max_conns=\d+/);
+});
