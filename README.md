@@ -89,7 +89,8 @@ kills the task running the gateway, order, payment and pipeline services mid-req
 missing. Clients saw about 11 seconds of retryable 503s during the database reboot and about 15 seconds with no
 response while ECS replaced the killed task. 11 checkouts were cut off between charging and marking the order paid
 (9) or mid-charge (2): a client retrying with the same key would finish them, but the load test doesn't retry, so
-they stayed PENDING.
+they stayed PENDING. Finishing those is the reconciler's job (`cmd/reconcile`), which runs every 5 minutes on AWS
+and does what a client retry would.
 
 CI runs everything against real Postgres and Kafka on every push, then starts the services and runs the
 end-to-end checks.
@@ -126,5 +127,4 @@ Most of these only showed up under load or during the chaos test:
 
 ## What's next
 
-- A reconciliation job for checkouts that were charged but never marked paid
 - A chaos test where a service gets slow instead of going down

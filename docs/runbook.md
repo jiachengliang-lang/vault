@@ -102,6 +102,25 @@ noticing the recreated topics, and the retry succeeds.
 
 **Fix:** bring Kafka back. Nothing to replay by hand; the relay catches up by itself. Watch the warnings stop.
 
+## Reconcile errors
+
+**Means:** the reconciler, which runs every 5 minutes to finish checkouts cut off part way, couldn't finish one, or
+couldn't run at all. Those orders stay PENDING, some possibly charged, until a run succeeds. It doesn't double
+charge: it retries a charge with the order's original key, and marks orders through the order service.
+
+**Check:**
+```bash
+aws logs tail "$LG" --since 30m --log-stream-name-prefix reconcile
+scripts/aws-sql.sh "SELECT o.status, p.status, count(*) FROM orders o LEFT JOIN payments p USING (order_id)
+  WHERE o.status = 'PENDING' AND o.created_at < now() - interval '2 minutes' GROUP BY 1, 2"
+```
+`reconcile order failed` names the order and the step (`charge` or `mark PAID`). Usually the order or payment
+service was down at the time: see [Service down](#service-down). `reconcile run failed` means it couldn't reach the
+database.
+
+**Fix:** fix whatever it couldn't reach; the next run picks the orders up again. Each run's summary line
+(`reconcile run`) shows how many it found and finished.
+
 ## Audit chain broken
 
 **Means:** the user service's minute-by-minute check of the audit log found an entry that was edited, deleted or

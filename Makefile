@@ -1,4 +1,4 @@
-.PHONY: up down logs psql topics build run test e2e lint load bench chaos aws-secrets aws-up aws-down aws-url
+.PHONY: up down logs psql topics build run test e2e lint load bench chaos reconcile aws-secrets aws-up aws-down aws-url
 
 up:        ## start infra (postgres, redpanda, dynamodb local, jaeger, prometheus, grafana)
 	docker compose up -d
@@ -40,6 +40,9 @@ bench: build ## latency at increasing fixed rates (run `make run` in another ter
 
 chaos: build ## break Postgres, Kafka and payment under load, then check consistency (needs `make run`)
 	./scripts/chaos.sh
+
+reconcile: build ## finish checkouts stuck PENDING, once (needs `make run`)
+	bin/reconcile
 
 aws-secrets: ## create the app keys in Secrets Manager (once)
 	infra/scripts/create-secrets.sh

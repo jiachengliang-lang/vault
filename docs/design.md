@@ -18,6 +18,12 @@ because the two can drift apart.
 
 Other users' orders return 404 rather than 403, so nobody can probe which order IDs exist.
 
+A checkout cut off part way (charged but not marked paid, or mid-charge) is finished by a client retry with the same
+key. For clients that never retry, a reconciler (`cmd/reconcile`, every 5 minutes on AWS) does the same thing: for
+each order PENDING for over 2 minutes it marks it from the payment's result, or retries a charge left PENDING with
+the order's original key, going through the order and payment services so the same rules and events apply. An
+order with no payment at all is left an hour for the client to come back, then marked FAILED.
+
 ## Events
 
 The order service never writes to Postgres and Kafka separately, because one could succeed and the other fail. It
@@ -100,8 +106,6 @@ path, since a label per order ID would grow forever.
 ## Known limitations
 
 - All services share one Postgres database locally. In production each would have its own.
-- An order that was charged but never marked paid stays PENDING until the client retries. A reconciliation job
-  would fix this.
 - Since keys moved out of the transaction, a profile update racing an account deletion can leave behind a row
   encrypted under the destroyed key. It can't be read (reads treat a missing key as "not found"), and the next
   update for that user replaces it.

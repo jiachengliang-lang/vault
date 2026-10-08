@@ -7,6 +7,8 @@ import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import { Platform } from 'aws-cdk-lib/aws-ecr-assets';
 import * as ecs from 'aws-cdk-lib/aws-ecs';
+import * as events from 'aws-cdk-lib/aws-events';
+import * as targets from 'aws-cdk-lib/aws-events-targets';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as kms from 'aws-cdk-lib/aws-kms';
 import * as logs from 'aws-cdk-lib/aws-logs';
@@ -261,6 +263,24 @@ export class VaultStack extends Stack {
     masterKey.grantEncryptDecrypt(user.task.taskRole);
     keysTable.grantReadWriteData(user.task.taskRole);
 
+    // ---------- reconciler ----------
+    // Finishes checkouts cut off part way (cmd/reconcile), every 5 minutes. A client retry with
+    // the same key would do the same; this covers clients that never retry.
+    const reconcileTask = new ecs.Ec2TaskDefinition(this, 'ReconcileTask', { networkMode: ecs.NetworkMode.HOST });
+    reconcileTask.addContainer('reconcile', {
+      image: appImage,
+      command: ['/app/reconcile'],
+      environment: common,
+      secrets: dbSecrets,
+      memoryReservationMiB: 64,
+      logging: logging('reconcile'),
+    });
+    new events.Rule(this, 'ReconcileSchedule', {
+      description: 'Run the Vault reconciler',
+      schedule: events.Schedule.rate(Duration.minutes(5)),
+      targets: [new targets.EcsTask({ cluster, taskDefinition: reconcileTask, launchType: ecs.LaunchType.EC2 })],
+    });
+
     // ---------- one-off SQL ----------
     // The database is only reachable from inside the VPC. scripts/aws-sql.sh runs psql against it
     // as a one-off task on the host, using this definition, and prints what it returns. The chaos
@@ -361,6 +381,14 @@ export class VaultStack extends Stack {
         minutes: 3,
         description: 'Events have failed to reach Kafka for 3 minutes in a row; they are waiting in the outbox.',
         anchor: 'outbox-stuck',
+      },
+      {
+        id: 'ReconcileErrors',
+        pattern: '{ $.msg = "reconcile order failed" || $.msg = "reconcile run failed" }',
+        threshold: 0,
+        minutes: 10,
+        description: 'The reconciler could not finish a stuck checkout, or could not run.',
+        anchor: 'reconcile-errors',
       },
       {
         id: 'AuditChainBroken',
