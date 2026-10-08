@@ -13,7 +13,10 @@ make aws-url       # print the gateway URL
 make aws-down      # delete everything except the keys
 ```
 
-The first deploy to an account also needs `npx cdk bootstrap` (from this folder).
+The first deploy to an account also needs `npx cdk bootstrap` (from this folder), then
+`scripts/ecr-cleanup.sh`: CDK tags every container image, so the bootstrap's own cleanup rule (untagged images only)
+never removes any, and each deploy leaves ~150 MB behind. The script keeps the 10 most recent. Re-run it after any
+`cdk bootstrap`, which resets the policy.
 
 ## Deploying from GitHub
 
