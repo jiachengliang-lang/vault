@@ -126,3 +126,15 @@ test('every service sets its own Postgres pool size', () => {
   expect(urls.length).toBeGreaterThan(0);
   for (const u of urls) expect(u).toMatch(/pool_max_conns=\d+/);
 });
+
+test('the reconciler runs every 5 minutes on the cluster', () => {
+  template.hasResourceProperties('AWS::Events::Rule', {
+    ScheduleExpression: 'rate(5 minutes)',
+    // No LaunchType: EC2 is the default, which places it on the cluster's host.
+    Targets: [Match.objectLike({ EcsParameters: Match.objectLike({ TaskCount: 1 }) })],
+  });
+  const containers = Object.values(template.findResources('AWS::ECS::TaskDefinition')).flatMap(
+    (t) => t.Properties.ContainerDefinitions,
+  );
+  expect(containers.find((c: { Name: string }) => c.Name === 'reconcile').Command).toEqual(['/app/reconcile']);
+});

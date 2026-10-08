@@ -83,6 +83,15 @@ The chaos test sends 300 checkouts a second for 100 seconds while it freezes Pos
 payment service. In the latest run that was about 27,700 orders with 0 charged twice and 0 events lost. Checkout
 kept working the whole time Kafka was down, because events waited in the outbox until it came back.
 
+`scripts/aws-chaos.sh` does the same on AWS at 100 checkouts a second for 7 minutes: it reboots the database, then
+kills the task running the gateway, order, payment and pipeline services mid-request, then the user service. Of
+39,411 orders, none was charged twice, every paid order had exactly one successful payment, and no event went
+missing. Clients saw about 11 seconds of retryable 503s during the database reboot and about 15 seconds with no
+response while ECS replaced the killed task. 11 checkouts were cut off between charging and marking the order paid
+(9) or mid-charge (2): a client retrying with the same key would finish them, but the load test doesn't retry, so
+they stayed PENDING. Finishing those is the reconciler's job (`cmd/reconcile`), which runs every 5 minutes on AWS
+and does what a client retry would.
+
 CI runs everything against real Postgres and Kafka on every push, then starts the services and runs the
 end-to-end checks.
 
@@ -118,5 +127,4 @@ Most of these only showed up under load or during the chaos test:
 
 ## What's next
 
-- A reconciliation job for checkouts that were charged but never marked paid
 - A chaos test where a service gets slow instead of going down

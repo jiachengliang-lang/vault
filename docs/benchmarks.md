@@ -75,7 +75,7 @@ At 400 a second, neither machine was busy and the database never had more than 1
 logs showed calls to the order service hitting the 2-second RPC timeout, then its circuit breaker opening; the
 median of 2,018 ms is that timeout. pgx sizes its connection pool from the number of CPUs, with a minimum of 4. That's
 10 connections on the laptop, but 4 on the 2-vCPU host, so order requests were queueing for a connection. The services
-now ask for 16 each (`pool_max_conns` in `DATABASE_URL`).
+now ask for 16 each (`pool_max_conns` in `DATABASE_URL`), 64 in all, under the database's limit of 79.
 
 ### After
 

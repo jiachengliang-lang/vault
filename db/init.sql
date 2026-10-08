@@ -28,6 +28,9 @@ CREATE TABLE orders (
     -- keys are scoped per user: two users picking the same key must not collide
     UNIQUE (user_id, idempotency_key)
 );
+-- The reconciler looks for orders stuck PENDING. Only PENDING rows are indexed, so it stays tiny
+-- however many orders there are: a checkout moves its order out within a second.
+CREATE INDEX orders_pending_by_age ON orders (created_at) WHERE status = 'PENDING';
 
 -- Transactional outbox: written in the SAME transaction as the order row,
 -- then a relay publishes it to Kafka and deletes it. Solves the dual-write problem.
@@ -49,6 +52,7 @@ CREATE TABLE payments (
     status          TEXT NOT NULL,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+CREATE INDEX payments_by_order ON payments (order_id); -- the reconciler's lookup from an order to its payment
 
 -- ---------- audit log: append-only, hash-chained (tamper-evident) ----------
 CREATE TABLE audit_log (

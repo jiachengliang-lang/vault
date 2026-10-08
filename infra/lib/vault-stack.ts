@@ -7,6 +7,8 @@ import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import { Platform } from 'aws-cdk-lib/aws-ecr-assets';
 import * as ecs from 'aws-cdk-lib/aws-ecs';
+import * as events from 'aws-cdk-lib/aws-events';
+import * as targets from 'aws-cdk-lib/aws-events-targets';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as kms from 'aws-cdk-lib/aws-kms';
 import * as logs from 'aws-cdk-lib/aws-logs';
@@ -207,8 +209,8 @@ export class VaultStack extends Stack {
       // pgx sizes its pool from the CPU count, max(4, cores): 10 on a laptop, but 4 on this
       // 2-vCPU host. A load test on AWS failed at 400 checkouts/s with the host at 25% CPU and the
       // database at 35%: the order service's requests were queueing for one of its 4 connections
-      // until the 2 s RPC timeout. Four services at 16 each stay well under the ~100 connections
-      // a db.t4g.micro allows.
+      // until the 2 s RPC timeout. Four services at 16 each is 64, under the 79 connections a
+      // db.t4g.micro allows (max_connections, checked with scripts/aws-sql.sh).
       DATABASE_URL: 'postgres:///vault?sslmode=require&pool_max_conns=16',
       KAFKA_BROKERS: 'localhost:9092',
       // No trace collector yet; sampling nothing keeps the exporter quiet.
@@ -260,6 +262,24 @@ export class VaultStack extends Stack {
     ]);
     masterKey.grantEncryptDecrypt(user.task.taskRole);
     keysTable.grantReadWriteData(user.task.taskRole);
+
+    // ---------- reconciler ----------
+    // Finishes checkouts cut off part way (cmd/reconcile), every 5 minutes. A client retry with
+    // the same key would do the same; this covers clients that never retry.
+    const reconcileTask = new ecs.Ec2TaskDefinition(this, 'ReconcileTask', { networkMode: ecs.NetworkMode.HOST });
+    reconcileTask.addContainer('reconcile', {
+      image: appImage,
+      command: ['/app/reconcile'],
+      environment: common,
+      secrets: dbSecrets,
+      memoryReservationMiB: 64,
+      logging: logging('reconcile'),
+    });
+    new events.Rule(this, 'ReconcileSchedule', {
+      description: 'Run the Vault reconciler',
+      schedule: events.Schedule.rate(Duration.minutes(5)),
+      targets: [new targets.EcsTask({ cluster, taskDefinition: reconcileTask, launchType: ecs.LaunchType.EC2 })],
+    });
 
     // ---------- one-off SQL ----------
     // The database is only reachable from inside the VPC. scripts/aws-sql.sh runs psql against it
@@ -361,6 +381,14 @@ export class VaultStack extends Stack {
         minutes: 3,
         description: 'Events have failed to reach Kafka for 3 minutes in a row; they are waiting in the outbox.',
         anchor: 'outbox-stuck',
+      },
+      {
+        id: 'ReconcileErrors',
+        pattern: '{ $.msg = "reconcile order failed" || $.msg = "reconcile run failed" }',
+        threshold: 0,
+        minutes: 10,
+        description: 'The reconciler could not finish a stuck checkout, or could not run.',
+        anchor: 'reconcile-errors',
       },
       {
         id: 'AuditChainBroken',
